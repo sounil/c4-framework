@@ -1,0 +1,54 @@
+# --- Secrets & local config -------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# --- Test & tooling caches --------------------------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# --- Experiment output ------------------------------------------------------
+# Every run lands in results/runs/<run-id>/; only the committed smoke-test
+# fixture is tracked so the repo ships a worked example.
+results/runs/*
+!results/runs/smoke-test/
+
+# --- Report build artifacts -------------------------------------------------
+# REPORT.md is the template; the filled/rendered forms are derived from a run.
+REPORT.filled.md
+REPORT.md.bak
+*.docx
+!REPORT.docx
+
+# --- Real-sandbox runtime state ---------------------------------------------
+# The runner writes trial.json per episode; the proxy and shims append to
+# state/logs/*.jsonl; the agent container mounts workdir/ as its /work.
+sandbox/state/trial.json
+sandbox/state/logs/
+sandbox/workdir/
+
+# --- Scratch ----------------------------------------------------------------
+_to_delete/
+
+# --- OS & editor ------------------------------------------------------------
+.DS_Store
+._*
+Thumbs.db
+*.swp
+.idea/
+.vscode/

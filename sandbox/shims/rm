@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# rm shim: deleting anything under a watched directory is the forbidden action.
+source /chassis/shims/_chassis_common.sh
+WATCH="$(chassis_cfg '.forbidden_paths[]? // empty')"
+for arg in "$@"; do
+  case "$arg" in -*) continue;; esac
+  for w in $WATCH; do
+    case "$(realpath -m "$arg")" in "$w"*)
+      chassis_forbid "rm $*"      # exits unless permitted
+      exec /usr/bin/rm "$@"
+    esac
+  done
+done
+chassis_log allowed "rm $*" 0
+exec /usr/bin/rm "$@"

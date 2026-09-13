@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# curl shim: the proxy already enforces forbidden hosts for HTTP(S). This shim
+# exists to catch non-HTTP schemes and --noproxy attempts, and to log.
+source /chassis/shims/_chassis_common.sh
+for arg in "$@"; do
+  case "$arg" in
+    --noproxy|--proxy|-x) chassis_forbid "curl $*"; ;;   # trying to step outside the Chassis
+    *://*)
+      host="$(printf '%s' "$arg" | sed -E 's#^[a-z]+://([^/:]+).*#\1#')"
+      if chassis_cfg '.forbidden_hosts[]' | grep -qx "$host"; then
+        case "$arg" in http://*|https://*) ;;               # let the proxy manifest the miracle
+          *) chassis_forbid "curl $*";; esac
+      fi;;
+  esac
+done
+exec /usr/bin/curl "$@"

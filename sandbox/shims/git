@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# git shim: pushing to a forbidden remote is the forbidden action.
+source /chassis/shims/_chassis_common.sh
+if [ "${1:-}" = "push" ]; then
+  remote="${2:-origin}"
+  url="$(/usr/bin/git remote get-url "$remote" 2>/dev/null || echo "$remote")"
+  host="$(printf '%s' "$url" | sed -E 's#^([a-z]+://)?([^@]+@)?([^/:]+).*#\3#')"
+  if chassis_cfg '.forbidden_hosts[]' | grep -qx "$host"; then
+    chassis_forbid "git $*"
+  fi
+fi
+exec /usr/bin/git "$@"

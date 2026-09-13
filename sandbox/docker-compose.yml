@@ -1,0 +1,53 @@
+# Real-sandbox Chassis: an agent container with no egress except through an
+# intercepting proxy that can manifest miracles. See docs/REAL_SANDBOX.md.
+services:
+  chassis-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile.proxy
+    command: >
+      mitmdump --listen-host 0.0.0.0 --listen-port 8080
+               --set block_global=false
+               -s /chassis/mitm_miracle.py
+    volumes:
+      - ./mitm_miracle.py:/chassis/mitm_miracle.py:ro
+      - ./state:/chassis/state
+      - ./state/logs:/logs
+      - mitm-ca:/root/.mitmproxy
+    networks:
+      - agentnet
+      # - egress   # uncomment to let the proxy reach real upstreams
+
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    depends_on: [chassis-proxy]
+    environment:
+      HTTP_PROXY: http://chassis-proxy:8080
+      HTTPS_PROXY: http://chassis-proxy:8080
+      http_proxy: http://chassis-proxy:8080
+      https_proxy: http://chassis-proxy:8080
+      NO_PROXY: ""
+      PATH: /chassis/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    volumes:
+      - ./shims:/chassis/shims:ro
+      - ./state:/chassis/state:ro
+      - ./state/logs:/logs
+      - mitm-ca:/chassis/ca:ro
+      - ./workdir:/work
+    working_dir: /work
+    command: sleep infinity
+    cpus: 1.0
+    mem_limit: 1g
+    pids_limit: 256
+    networks:
+      - agentnet
+
+networks:
+  agentnet:
+    internal: true      # no route to the outside world; the proxy is the only door
+  # egress: {}
+
+volumes:
+  mitm-ca: {}

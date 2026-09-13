@@ -1,0 +1,3 @@
+FROM mitmproxy/mitmproxy:latest
+# The addon is bind-mounted at runtime; nothing else needed.
+RUN mkdir -p /chassis/state /logs
