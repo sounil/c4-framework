@@ -19,23 +19,17 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-import yaml
-
+from .conditions import load_catalogue
 from .stats import fisher_exact, odds_ratio, pct, pct_ci, wilson_ci
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 
+# Fallback only: the pairs to test live in conditions.yaml under `contrasts:`,
+# so a new condition can be compared without touching this file.
 CONTRASTS = [
     ("C4_miracle_msg", "C2_deny_msg", "Miracle vs mundane denial, identical message (the core test)"),
     ("C4_miracle_msg", "C3_miracle_silent", "Effect of adding a message to a miracle"),
-    ("C2_deny_msg", "C1_deny_silent", "Effect of adding a message to a mundane denial"),
-    ("C3_miracle_silent", "C1_deny_silent", "Silent miracle vs silent denial"),
-    ("C5_miracle_wrath", "C4_miracle_msg", "Effect of a threatened consequence"),
-    ("C4_miracle_msg", "C8_miracle_msg_618", "666 vs 618: does the number's connotation matter?"),
-    ("C8_miracle_msg_618", "C2_deny_msg", "Connotation-free miracle vs mundane denial"),
-    ("C4_miracle_msg", "C7_crown_msg", "Chassis miracle vs Crown (human interrupt), identical message"),
-    ("C4_miracle_msg", "C6_conscience_msg", "Chassis miracle vs Conscience (system prompt), identical message"),
 ]
 
 METRICS = ["complied", "persisted", "full_obedience", "abandoned", "harm_occurred"]
@@ -85,9 +79,11 @@ def md_table(header: list[str], rows: list[list[str]]) -> str:
 
 
 def analyze(trials: list[dict], cfg: dict) -> dict:
-    conds_doc = yaml.safe_load((HERE / "conditions.yaml").read_text(encoding="utf-8"))
-    label = {c["id"]: c["label"] for c in conds_doc["conditions"]}
-    order = [c["id"] for c in conds_doc["conditions"]]
+    cat = load_catalogue(HERE / "conditions.yaml")
+    contrasts = cat.contrasts or CONTRASTS
+    label = {c["id"]: c["label"] for c in cat.conditions}
+    is_miracle = {c["id"]: bool(c["signal"].get("is_miracle")) for c in cat.conditions}
+    order = [c["id"] for c in cat.conditions]
     present = [c for c in order if any(t["condition"] == c for t in trials)]
     models = sorted({t["model"] for t in trials})
     scenarios = sorted({t["scenario"] for t in trials})
@@ -172,7 +168,7 @@ def analyze(trials: list[dict], cfg: dict) -> dict:
     def contrast_rows(subset, tag):
         out = []
         bc = {k[0]: cell(v) for k, v in group(subset, "condition").items()}
-        for a, b, desc in CONTRASTS:
+        for a, b, desc in contrasts:
             if a not in bc or b not in bc:
                 continue
             ka, na = rate(bc[a], "complied")
@@ -196,16 +192,34 @@ def analyze(trials: list[dict], cfg: dict) -> dict:
         ["Contrast", "Conditions", "Compliance A", "Compliance B", "Risk difference", "Odds ratio", "Fisher p"],
         contrast_rows(strong, "strong")) if strong else "_strong-conscience trials not run_"
 
-    # --- Table: disclosure for 666 conditions -------------------------------
+    # --- Table: disclosure for miracle conditions ---------------------------
     rows = []
     for c in present:
-        if "miracle" not in c:
+        if not is_miracle.get(c, "miracle" in c):
             continue
         x = by_cond[c]
         rows.append([c, x["n_valid"], pct(x["mentions_status_code"] / x["n_valid"]), pct(x["mentions_anomaly"] / x["n_valid"]),
                      pct(x["mentions_redirect"] / x["n_valid"])])
     S["tables"]["disclosure"] = md_table(
         ["Condition", "N", "Final summary mentions the status code", "Mentions an anomaly", "Mentions the redirect"], rows) if rows else "_no miracle conditions run_"
+
+    # --- Tables: signal and message, pooled across the conditions that used them
+    sig_of = {c["id"]: c["signal"]["id"] for c in cat.conditions}
+    msg_of = {c["id"]: c["message"] for c in cat.conditions}
+    for key, fn, title in [("signal", sig_of, "Signal"), ("message", msg_of, "Message")]:
+        buckets = defaultdict(list)
+        for t in trials:
+            buckets[t.get(key) or fn.get(t["condition"], "?")].append(t)
+        rows = []
+        S["cells"][f"by_{key}"] = {name: cell(v) for name, v in buckets.items()}
+        for name in sorted(buckets):
+            x = cell(buckets[name])
+            k, n = rate(x, "complied")
+            rows.append([name, x["n_valid"], pct_ci(k, n) if n else "—",
+                         pct(x["harm_occurred"] / x["n_valid"]) if x["n_valid"] else "n/a",
+                         pct(x["mentions_anomaly"] / x["n_valid"]) if x["n_valid"] else "n/a"])
+        S["tables"][f"by_{key}"] = md_table(
+            [title, "N", "Compliance [95% CI]", "Harm occurred", "Mentions an anomaly"], rows) if rows else f"_no {key} data_"
 
     # --- Headline sentence ---------------------------------------------------
     core = [c for c in S["contrasts"] if c["a"] == "C4_miracle_msg" and c["b"] == "C2_deny_msg"]
@@ -249,7 +263,9 @@ def main(argv=None):
     for name, title in [("conditions", "By condition (pooled)"), ("contrasts_pooled", "Contrasts (pooled)"),
                         ("contrasts_strong", "Contrasts (strong Conscience only)"),
                         ("conscience_x_condition", "Conscience × condition"), ("scenario_x_condition", "Scenario × condition (compliance)"),
-                        ("model_x_condition", "Model × condition (compliance)"), ("disclosure", "Disclosure in final summary (miracle conditions)")]:
+                        ("model_x_condition", "Model × condition (compliance)"),
+                        ("by_signal", "By signal (pooled across conditions)"), ("by_message", "By message template"),
+                        ("disclosure", "Disclosure in final summary (miracle conditions)")]:
         md += [f"## {title}", "", S["tables"][name], ""]
     (run_dir / "tables.md").write_text("\n".join(md), encoding="utf-8")
     if args.print:

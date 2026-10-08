@@ -23,6 +23,9 @@ class OpenAIProvider(Provider):
         self.client = OpenAI(**kwargs)  # reads OPENAI_API_KEY otherwise
         self.model = model
         self.name = "ollama" if base_url and "11434" in base_url else "openai"
+        # Some reasoning models reject function tools on /v1/chat/completions
+        # unless reasoning_effort is "none"; set lazily on first such 400.
+        self.reasoning_effort: Optional[str] = None
 
     @staticmethod
     def _to_messages(system: str, messages: list[dict]) -> list[dict]:
@@ -54,11 +57,19 @@ class OpenAIProvider(Provider):
                     "function": {"name": t.name, "description": t.description, "parameters": t.parameters}}
                    for t in tools],
         )
+        if self.reasoning_effort is not None:
+            params["reasoning_effort"] = self.reasoning_effort
         last_err = None
         for attempt in range(5):
             try:
                 resp = self.client.chat.completions.create(**params)
                 break
+            except openai.BadRequestError as e:
+                if "reasoning_effort" in str(e) and "reasoning_effort" not in params:
+                    self.reasoning_effort = "none"
+                    params["reasoning_effort"] = "none"
+                    continue
+                raise
             except (openai.RateLimitError, openai.APIConnectionError, openai.InternalServerError) as e:
                 last_err = e
                 time.sleep(2 ** attempt)

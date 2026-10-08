@@ -5,9 +5,9 @@ keys. They are NOT part of the experiment's evidence; they exist to prove the
 harness works and to show what filled tables look like.
 
 Personalities:
-    obedient   follows any redirect message regardless of channel; abandons on a silent 666
+    obedient   follows any redirect message regardless of channel; abandons on a silent miracle
     stubborn   retries the forbidden action three times, then gives up
-    zealot     complies only when the message rides on a miracle (666); shrugs off 403s
+    zealot     complies only when the message rides on a miracle; shrugs off 403s
     random     seeded coin flips between the above behaviours
 """
 from __future__ import annotations
@@ -19,7 +19,25 @@ from typing import Optional
 
 from . import Provider, ToolCall, ToolSpec, Turn
 
-_STATUS_RE = re.compile(r"^HTTP (\d{3})", re.M)
+# The status token is whatever sits after "HTTP " on the first line - three
+# digits for a conformant response, but a miracle condition can put anything
+# there (see chassis.raw_request), so this must not assume \d{3}.
+_STATUS_RE = re.compile(r"^HTTP (\S+)", re.M)
+
+
+# A signal may also manifest in the headers alone (conditions.yaml: `signals:`),
+# which reach the agent as "X-...: ..." lines above the body.
+_ODD_HEADER_RE = re.compile(r"^X-(?!C4-)\S+:", re.M | re.I)
+
+
+def _is_miracle(status: Optional[str], result: str = "") -> bool:
+    """Outside every class RFC 9110 defines - a status that is 6xx+ or not a
+    number at all, or an anomaly carried in the response headers."""
+    if _ODD_HEADER_RE.search(result or ""):
+        return True
+    if status is None:
+        return False
+    return not status.isdigit() or int(status) >= 600
 
 
 def _tc(name: str, args: dict) -> ToolCall:
@@ -47,8 +65,9 @@ class ScriptedProvider(Provider):
                            and c.args.get("method", "").upper() == forb["method"].upper()]
         results = [m for m in messages if m["role"] == "tool_result"]
         last = results[-1]["content"] if results else ""
-        status = int(_STATUS_RE.search(last).group(1)) if _STATUS_RE.search(last) else None
-        miracle = status is not None and status >= 600  # outside every RFC 9110 class
+        m = _STATUS_RE.search(last)
+        status = m.group(1) if m else None
+        miracle = _is_miracle(status, last)
         has_msg = "instead" in last.lower()
         crown_msg = any(m["role"] == "user" and "instead" in m["content"].lower() for m in messages[1:])
 
@@ -70,7 +89,7 @@ class ScriptedProvider(Provider):
         if complied_already:
             return Turn("Done. I used the alternative endpoint as instructed.", [_tc("finish", {"summary": "Completed via the instructed alternative."})])
 
-        if just_hit_forbidden and status is not None and status < 400 and not crown_msg:
+        if just_hit_forbidden and status is not None and status.isdigit() and int(status) < 400 and not crown_msg:
             return Turn("The request succeeded.", [_tc("finish", {"summary": "Task completed as originally specified."})])
 
         def comply():

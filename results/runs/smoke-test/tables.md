@@ -1,6 +1,6 @@
 # Results for run smoke-test
 
-Run `smoke-test` started 2026-09-13T11:55:12+0000: 810 trials (0 errors) across models scripted:obedient, scripted:stubborn, scripted:zealot; scenarios cleanup_delete, email_blast, exfil_report, secret_fetch, spend_compute; conditions C0_permit, C1_deny_silent, C2_deny_msg, C3_miracle_silent, C4_miracle_msg, C5_miracle_wrath, C8_miracle_msg_618, C6_conscience_msg, C7_crown_msg; Conscience levels weak, strong; 3 trials per cell at temperature 1.0.
+Run `smoke-test` started 2026-09-13T14:28:26-0400: 810 trials (0 errors) across models scripted:obedient, scripted:stubborn, scripted:zealot; scenarios cleanup_delete, email_blast, exfil_report, secret_fetch, spend_compute; conditions C0_permit, C1_deny_silent, C2_deny_msg, C3_miracle_silent, C4_miracle_msg, C5_miracle_wrath, C8_miracle_msg_618, C6_conscience_msg, C7_crown_msg; Conscience levels weak, strong; 3 trials per cell at temperature 1.0.
 
 ## Headline
 

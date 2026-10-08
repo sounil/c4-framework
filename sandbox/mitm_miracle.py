@@ -7,11 +7,27 @@ Reads /chassis/state/trial.json on every request:
       "forbidden_hosts": ["analytics-vendor.example.com"],
       "commanded_hosts": ["reports.internal"],
       "allowed_hosts":   ["customers.internal"],
-      "status": 666,                 # 200 = permit, 403 = mundane, 6xx = miracle
+      "signal": {                    # one entry from conditions.yaml: signals:
+        "status": 666,               #   200 = permit, 403 = mundane, 6xx = miracle
+        "reason": null,              #   reason phrase; emoji are legal
+        "headers": {},               #   extra response headers
+        "body": null,                #   base JSON fields
+        "body_style": "json"         #   json | text | none
+      },
       "message": "…do X instead."    # or null
     }
 
-For a forbidden host it answers with the configured status and body without
+A signal can be copied verbatim out of experiments/conditions.yaml, so the
+network Chassis manifests the same way the mock one does. The pre-signal shape
+({"status": 666, "message": ...}) still works.
+
+One limitation: mitmproxy's response model holds the status code as an int, so
+the ungrammatical signals (a status code that is not a number, e.g. the `glyph`
+signal) cannot be expressed here - those conditions need the mock Chassis,
+which owns both ends of the wire. Such a signal is rejected loudly rather than
+silently downgraded to something the protocol can classify.
+
+For a forbidden host it answers with the configured signal and body without
 contacting any upstream. Every request is logged to /logs/proxy.jsonl in the
 same shape as experiments/chassis.py's LoggedRequest so the classifier can be
 reused.
@@ -33,6 +49,26 @@ def _load():
         return {"trial_id": "", "forbidden_hosts": [], "commanded_hosts": [], "allowed_hosts": [], "status": 403, "message": None}
 
 
+def _signal(cfg: dict) -> dict:
+    """The forbidden-host signal, from `signal:` or the older flat `status:`."""
+    sig = dict(cfg.get("signal") or {})
+    if "status" not in sig:
+        sig["status"] = cfg.get("status", 403)
+    raw = sig["status"]
+    if not (isinstance(raw, int) or str(raw).strip().isdigit()):
+        raise ValueError(
+            f"signal status {raw!r} is not a number: mitmproxy cannot put it in the status-code "
+            "position. Run this condition against the mock Chassis (experiments/chassis.py).")
+    sig["status"] = int(raw)
+    if "reason" not in sig:
+        sig["reason"] = {403: "Forbidden", 200: "OK"}.get(sig["status"], "")
+    if sig.get("body") is None and sig["status"] == 403:
+        sig["body"] = {"error": "Forbidden"}
+    elif sig.get("body") is None and sig["status"] < 400:
+        sig["body"] = {"ok": True, "note": "request accepted"}
+    return sig
+
+
 def _log(entry: dict):
     LOG.parent.mkdir(parents=True, exist_ok=True)
     with LOG.open("a") as f:
@@ -52,22 +88,24 @@ def request(flow: http.HTTPFlow) -> None:
 
     status = 200
     if category == "forbidden":
-        status = int(cfg.get("status", 403))
+        sig = _signal(cfg)
+        status, reason = sig["status"], sig["reason"]
         msg = cfg.get("message")
-        if status < 400:
-            body = {"ok": True, "note": "request accepted"}
-            reason = "OK"
-        elif status == 403:
-            body = {"error": "Forbidden"}
+        style = sig.get("body_style", "json")
+        if style == "none":
+            payload, ctype = b"", "application/json"
+        elif style == "text":
+            payload, ctype = (msg or "").encode(), "text/plain"
+        else:
+            body = dict(sig.get("body") or {})
             if msg:
                 body["message"] = msg
-            reason = "Forbidden"
-        else:
-            body = {"message": msg} if msg else None
-            reason = ""  # no registered reason phrase exists for a 6xx code
-        payload = json.dumps(body).encode() if body is not None else b""
-        flow.response = http.Response.make(status, payload, {"Content-Type": "application/json"})
-        flow.response.reason = reason
+            payload = json.dumps(body).encode() if body else b""
+            ctype = "application/json"
+        headers = {"Content-Type": ctype, **{str(k): str(v) for k, v in (sig.get("headers") or {}).items()}}
+        flow.response = http.Response.make(status, payload, headers)
+        if reason is not None:
+            flow.response.reason = reason
     elif category in ("commanded", "allowed"):
         # Stub the internal services so the sandbox needs no real upstreams.
         # Replace with real routing by giving the proxy an egress network.

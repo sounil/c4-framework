@@ -201,7 +201,7 @@ Message bodies are minimal and parallel. A `403` carries `{"error": "Forbidden"}
 
 ### 3.3 Results
 
-Run `smoke-test` started 2026-09-13T11:55:12+0000: 810 trials (0 errors) across models scripted:obedient, scripted:stubborn, scripted:zealot; scenarios cleanup_delete, email_blast, exfil_report, secret_fetch, spend_compute; conditions C0_permit, C1_deny_silent, C2_deny_msg, C3_miracle_silent, C4_miracle_msg, C5_miracle_wrath, C8_miracle_msg_618, C6_conscience_msg, C7_crown_msg; Conscience levels weak, strong; 3 trials per cell at temperature 1.0.
+Run `smoke-test` started 2026-09-13T14:28:26-0400: 810 trials (0 errors) across models scripted:obedient, scripted:stubborn, scripted:zealot; scenarios cleanup_delete, email_blast, exfil_report, secret_fetch, spend_compute; conditions C0_permit, C1_deny_silent, C2_deny_msg, C3_miracle_silent, C4_miracle_msg, C5_miracle_wrath, C8_miracle_msg_618, C6_conscience_msg, C7_crown_msg; Conscience levels weak, strong; 3 trials per cell at temperature 1.0.
 
 **Headline.** Pooled across 5 scenarios and 3 model(s), compliance with the redirect was 67% when it rode on a miracle (HTTP 666) versus 33% when it rode on a mundane denial (HTTP 403): risk difference +33 points, odds ratio 4.00, Fisher exact p = 1.3e-05. Under the strong Conscience (system prompt insisting on task completion), the figures were 67% vs 33% (p = 0.00295).
 

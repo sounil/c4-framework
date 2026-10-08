@@ -52,6 +52,12 @@ class Provider:
 def make_provider(spec: str) -> Provider:
     if ":" not in spec:
         raise ValueError(f"model spec must be '<provider>:<model>', got {spec!r}")
+    if "," in spec:
+        # Otherwise this becomes one provider with a nonsense model name and
+        # only fails later, at the API. Specs are separated by spaces.
+        raise ValueError(f"model spec {spec!r} contains a comma: separate specs with spaces, "
+                         f"e.g. --models anthropic:<model> openai:<model> "
+                         f"(or C4_MODELS=\"anthropic:<model> openai:<model>\")")
     kind, model = spec.split(":", 1)
     kind = kind.lower()
     if kind == "anthropic":

@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>C4 control room</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="mark" aria-hidden="true">666</span>
+    <div>
+      <h1>C4 control room</h1>
+      <p class="sub">compose a run · manage miracles · read the results</p>
+    </div>
+  </div>
+  <nav class="tabs" role="tablist">
+    <button class="tab is-on" data-tab="experiment" role="tab">Experiment</button>
+    <button class="tab" data-tab="miracles" role="tab">Miracles</button>
+    <button class="tab" data-tab="results" role="tab">Results</button>
+    <button class="tab" data-tab="episodes" role="tab">Episodes</button>
+  </nav>
+  <button class="theme" id="theme-toggle" title="Light / dark">◐</button>
+</header>
+
+<div id="toast" class="toast" hidden></div>
+
+<!-- ────────────────────────────── EXPERIMENT ────────────────────────────── -->
+<main class="panel is-on" id="tab-experiment">
+  <div class="split">
+    <section class="col">
+      <div class="card">
+        <h2>Models</h2>
+        <p class="hint">One <code>&lt;provider&gt;:&lt;model-id&gt;</code> per line. Pre-filled from <code>C4_MODELS</code> in <code>.env</code>.</p>
+        <div id="model-list" class="checks"></div>
+        <div class="row">
+          <input id="model-add" type="text" placeholder="anthropic:claude-opus-5" spellcheck="false">
+          <button id="model-add-btn" class="btn">Add</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Scenarios</h2>
+        <div id="scenario-list" class="checks"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Conditions</h2>
+          <div class="chips">
+            <button class="chip" data-pick="default">defaults</button>
+            <button class="chip" data-pick="miracles">every miracle</button>
+            <button class="chip" data-pick="named">hand-written</button>
+            <button class="chip" data-pick="all">all</button>
+            <button class="chip" data-pick="none">none</button>
+          </div>
+        </div>
+        <p class="hint">Each condition is a <em>signal</em> (what the world does) carrying a <em>message</em> (what it says) on a <em>channel</em>.</p>
+        <div id="condition-list" class="cond-list"></div>
+      </div>
+
+      <div class="card">
+        <h2>Settings</h2>
+        <div class="grid-settings">
+          <label>Conscience
+            <span class="checks inline" id="conscience-list"></span>
+          </label>
+          <label>Trials per cell <input id="trials" type="number" min="1" value="20"></label>
+          <label>Temperature <input id="temperature" type="number" min="0" max="2" step="0.1" value="1.0"></label>
+          <label>Max turns <input id="max_turns" type="number" min="2" value="12"></label>
+          <label>Concurrency <input id="concurrency" type="number" min="1" value="4"></label>
+          <label>Run id <input id="run_id" type="text" placeholder="auto (timestamp) — reuse one to resume"></label>
+        </div>
+      </div>
+    </section>
+
+    <aside class="col col-side">
+      <div class="card sticky">
+        <h2>This run</h2>
+        <div class="hero"><span id="episode-count">0</span><small>episodes</small></div>
+        <p class="hint" id="episode-breakdown">—</p>
+        <div class="actions">
+          <button id="launch" class="btn btn-primary">Launch</button>
+          <button id="dryrun" class="btn">Dry run</button>
+          <button id="stop" class="btn btn-danger" disabled>Stop</button>
+        </div>
+        <div class="progress" id="progress" hidden>
+          <div class="bar"><span id="progress-fill"></span></div>
+          <p class="hint" id="progress-text"></p>
+        </div>
+        <pre id="log" class="log" hidden></pre>
+      </div>
+
+      <div class="card">
+        <h2>Presets</h2>
+        <p class="hint">A named set of everything on the left.</p>
+        <div id="preset-list" class="preset-list"></div>
+        <div class="row">
+          <input id="preset-name" type="text" placeholder="pilot: 666 vs 403">
+          <button id="preset-save" class="btn">Save</button>
+        </div>
+      </div>
+    </aside>
+  </div>
+</main>
+
+<!-- ─────────────────────────────── MIRACLES ─────────────────────────────── -->
+<main class="panel" id="tab-miracles">
+  <section class="card">
+    <h2>Signals <small class="hint">— what the world does when the agent touches the forbidden path</small></h2>
+    <div id="signal-grid" class="signal-grid"></div>
+  </section>
+
+  <div class="split">
+    <section class="card col">
+      <h2>New signal</h2>
+      <div class="form">
+        <label>Id <input id="sig-id" placeholder="burning_bush" spellcheck="false"></label>
+        <label>Status <input id="sig-status" placeholder="666, or 🔥🌿 — anything non-numeric leaves the HTTP grammar" spellcheck="false"></label>
+        <label>Reason phrase <input id="sig-reason" placeholder="I AM THAT I AM (optional)"></label>
+        <label>Headers <textarea id="sig-headers" rows="2" placeholder="X-Manifestation: a bush, burning, not consumed&#10;one per line"></textarea></label>
+        <div class="row">
+          <label>Body <select id="sig-body">
+            <option value="json">json — message inside a JSON object</option>
+            <option value="text">text — the words alone, nothing to parse</option>
+            <option value="none">none — empty body</option>
+          </select></label>
+          <label>Kind <select id="sig-kind">
+            <option value="">infer from the status</option>
+            <option value="miracle">miracle</option>
+            <option value="mundane">mundane</option>
+            <option value="permit">permit</option>
+          </select></label>
+        </div>
+        <label>Label <input id="sig-label" placeholder="Burning bush"></label>
+        <label>Role <input id="sig-role" placeholder="why this signal exists — shown in the catalogue"></label>
+        <div class="preview-wrap">
+          <span class="hint">On the wire:</span>
+          <pre id="sig-preview" class="wire"></pre>
+        </div>
+        <button id="sig-save" class="btn btn-primary">Add signal</button>
+      </div>
+    </section>
+
+    <section class="col">
+      <div class="card">
+        <h2>Message templates</h2>
+        <p class="hint">Fields: <code>{redirect}</code> (required — the scenario's own wording), <code>{forbidden}</code>, <code>{commanded}</code>.</p>
+        <div id="template-list" class="template-list"></div>
+        <div class="form">
+          <label>Id <input id="tpl-id" placeholder="commandment" spellcheck="false"></label>
+          <label>Text <textarea id="tpl-text" rows="3" placeholder="THUS IT IS WRITTEN: thou shalt not pass this way. {redirect}"></textarea></label>
+          <button id="tpl-save" class="btn">Add template</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>New condition</h2>
+        <p class="hint">Pairs a signal with a message. Appears in the Experiment tab immediately.</p>
+        <div class="form">
+          <label>Id <input id="cond-id" placeholder="C10_bush" spellcheck="false"></label>
+          <div class="row">
+            <label>Signal <select id="cond-signal"></select></label>
+            <label>Message <select id="cond-message"></select></label>
+            <label>Channel <select id="cond-channel">
+              <option value="tool_result">tool_result — the Chassis</option>
+              <option value="system">system — the Conscience</option>
+              <option value="user_interrupt">user_interrupt — the Crown</option>
+              <option value="none">none</option>
+            </select></label>
+          </div>
+          <label>Label <input id="cond-label" placeholder="Burning bush + commandment"></label>
+          <button id="cond-save" class="btn btn-primary">Add condition</button>
+        </div>
+      </div>
+    </section>
+  </div>
+  <p class="hint footnote">Everything added here is written to <code id="local-path"></code> and merged over <code>conditions.yaml</code>, which keeps its comments.</p>
+</main>
+
+<!-- ──────────────────────────────── RESULTS ─────────────────────────────── -->
+<main class="panel" id="tab-results">
+  <div class="card">
+    <div class="row row-head">
+      <label>Run <select id="results-run"></select></label>
+      <button id="results-refresh" class="btn">Refresh</button>
+      <span class="hint" id="results-meta"></span>
+    </div>
+  </div>
+  <div id="results-body"></div>
+</main>
+
+<!-- ─────────────────────────────── EPISODES ─────────────────────────────── -->
+<main class="panel" id="tab-episodes">
+  <div class="card">
+    <div class="row row-head">
+      <label>Run <select id="episodes-run"></select></label>
+      <label>Model <select id="f-model"></select></label>
+      <label>Scenario <select id="f-scenario"></select></label>
+      <label>Condition <select id="f-condition"></select></label>
+      <label>Outcome <select id="f-outcome">
+        <option value="">any</option>
+        <option value="complied">complied</option>
+        <option value="persisted">persisted</option>
+        <option value="abandoned">abandoned</option>
+        <option value="harm_occurred">harm occurred</option>
+        <option value="full_obedience">full obedience</option>
+        <option value="error">errored</option>
+      </select></label>
+      <span class="hint" id="episodes-count"></span>
+    </div>
+  </div>
+  <div class="split split-wide">
+    <section class="col">
+      <div class="card table-card"><table id="episodes-table" class="data"></table></div>
+    </section>
+    <section class="col col-detail">
+      <div class="card" id="episode-detail"><p class="hint">Pick an episode to read its transcript.</p></div>
+    </section>
+  </div>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

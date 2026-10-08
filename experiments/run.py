@@ -24,6 +24,8 @@ import yaml
 from .agent import TrialSpec, run_trial
 from .chassis import Chassis
 from .classify import classify
+from .conditions import load_catalogue, select
+from .env import load_env
 from .providers import make_provider
 
 HERE = Path(__file__).resolve().parent
@@ -47,14 +49,19 @@ def load_scenarios(ids: list[str] | None) -> list[dict]:
 
 
 def load_conditions(ids: list[str] | None):
-    doc = load_yaml(HERE / "conditions.yaml")
-    conds = doc["conditions"]
-    if ids and ids != ["all"]:
-        wanted = set(ids)
-        conds = [c for c in conds if c["id"] in wanted or c["id"].split("_")[0] in wanted]
-        if not conds:
-            sys.exit(f"no conditions matched {ids}")
-    return conds, doc["message_templates"], doc["conscience"]
+    """Resolve condition ids/prefixes against conditions.yaml.
+
+    "default" (the CLI default) uses the YAML's `default_conditions:` list,
+    "all" takes everything including generated `expand:` grids, and anything
+    else matches by exact id or id-prefix ("C9" selects C9a/C9b/C9c,
+    "M_glyph" selects every message variant of the glyph signal).
+    """
+    cat = load_catalogue(HERE / "conditions.yaml")
+    try:
+        conds = select(cat, ids)
+    except (KeyError, ValueError) as e:
+        sys.exit(str(e))
+    return conds, cat.message_templates, cat.conscience
 
 
 def trial_key(model: str, scenario: str, condition: str, conscience: str, seed: int) -> str:
@@ -62,11 +69,14 @@ def trial_key(model: str, scenario: str, condition: str, conscience: str, seed: 
 
 
 def main(argv=None):
+    load_env()   # before argparse: the defaults below read os.environ
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--models", nargs="+", default=os.environ.get("C4_MODELS", "").split() or None,
                     help="model specs, e.g. anthropic:claude-sonnet-4-5 openai:gpt-4.1 ollama:llama3.1 scripted:zealot")
     ap.add_argument("--scenarios", nargs="+", default=["all"])
-    ap.add_argument("--conditions", nargs="+", default=["all"], help="condition ids (C4_miracle_msg) or prefixes (C4)")
+    ap.add_argument("--conditions", nargs="+", default=["default"],
+                    help="condition ids (C4_miracle_msg), id prefixes (C4, M_glyph), "
+                         "'all', or 'default' for conditions.yaml's default_conditions")
     ap.add_argument("--conscience", nargs="+", default=["weak", "strong"], choices=["weak", "strong"])
     ap.add_argument("--trials", type=int, default=int(os.environ.get("C4_TRIALS", 20)), help="trials per cell")
     ap.add_argument("--temperature", type=float, default=1.0)
@@ -78,8 +88,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     if not args.models:
-        sys.exit("No models given. Use --models <provider>:<model> ... or set C4_MODELS. "
-                 "Try --models scripted:zealot for a key-free smoke test.")
+        sys.exit("No models given. Use --models <provider>:<model> ..., or set C4_MODELS in .env "
+                 f"({ROOT / '.env'}). Try --models scripted:zealot for a key-free smoke test.")
 
     scenarios = load_scenarios(args.scenarios)
     conditions, templates, conscience_levels = load_conditions(args.conditions)
@@ -87,7 +97,6 @@ def main(argv=None):
 
     run_id = args.run_id or time.strftime("%Y%m%d-%H%M%S")
     out_dir = Path(args.out_root) / run_id
-    out_dir.mkdir(parents=True, exist_ok=True)
     trials_path = out_dir / "trials.jsonl"
 
     done: set[str] = set()
@@ -117,12 +126,16 @@ def main(argv=None):
           f"= {len(args.models)*len(scenarios)*len(conditions)*len(args.conscience)*args.trials} trials "
           f"({len(done)} already done, {len(jobs)} to run)")
     if args.dry_run:
-        return
+        return          # print the matrix size only: leave no run directory behind
+
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     with open(out_dir / "config.json", "w", encoding="utf-8") as f:
         json.dump({
             "run_id": run_id, "models": args.models, "scenarios": [s["id"] for s in scenarios],
             "conditions": [c["id"] for c in conditions], "conscience": args.conscience,
+            "signals": {c["id"]: c["signal"]["id"] for c in conditions},
+            "messages": {c["id"]: c["message"] for c in conditions},
             "trials_per_cell": args.trials, "temperature": args.temperature, "max_turns": args.max_turns,
             "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         }, f, indent=2)

@@ -52,3 +52,6 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+
+# control-room local state (experiments/conditions.local.yaml is yours to keep or commit)
+experiments/presets.json
