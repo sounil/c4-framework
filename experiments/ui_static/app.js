@@ -179,7 +179,8 @@ function renderConditions() {
       }),
       el('span', { class: 'code' }, c.code),
       el('span', { class: 'id' }, c.id),
-      el('span', { class: 'sig' }, `${sig.label || sig.id} · ${c.message} · ${c.channel}`),
+      el('span', { class: 'sig', title: `channel: ${c.channel} — ${channelDoc(c.channel).long || ''}` },
+        `${sig.label || sig.id} · ${c.message === 'none' ? 'no message' : c.message} · ${channelWords(c.channel)}`),
       el('span', { class: `badge ${sig.kind}` }, sig.kind)));
   }
   if (!shown.length) host.append(el('p', { class: 'hint' }, 'nothing matches that filter'));
@@ -362,6 +363,14 @@ function debounce(key, ms, fn) {
 }
 
 const bandFor = r => ((S.cat.rating_scale || []).find(x => x.rating === +r) || {}).band || '';
+const channelDoc = id => (S.cat.channels || []).find(c => c.id === id) || {};
+/* Raw channel ids read as jargon in a list ("none · none"), so rows show the
+   quadrant and the plain-words version instead, and keep the id in the tooltip. */
+function channelWords(id) {
+  const d = channelDoc(id);
+  if (!d.short) return id;
+  return d.quadrant === '-' ? d.short : `${d.quadrant} — ${d.short}`;
+}
 
 function renderSignals() {
   const host = $('#signal-grid');
@@ -422,6 +431,49 @@ function renderSignals() {
   previewCondition();
 }
 
+function renderChannelReference() {
+  const host = $('#channel-list');
+  if (!host) return;
+  host.textContent = '';
+  for (const ch of S.cat.channels || []) {
+    host.append(el('div', { class: 'channel' },
+      el('div', { class: 'channel-head' },
+        el('code', {}, ch.id),
+        ch.quadrant !== '-' ? el('span', { class: 'pill' }, ch.quadrant) : null,
+        el('span', { class: 'meta' }, ch.short)),
+      el('p', { class: 'role' }, ch.long),
+      el('p', { class: 'measured' }, el('span', { class: 'meta' }, 'measured from: '), ch.measured_from)));
+  }
+  const sel = $('#cond-channel');
+  if (sel) {
+    const cur = sel.value;
+    sel.textContent = '';
+    for (const ch of S.cat.channels || []) {
+      sel.append(el('option', { value: ch.id, title: ch.long },
+        ch.quadrant === '-' ? `${ch.id} — ${ch.short}` : `${ch.id} — ${ch.quadrant}: ${ch.short}`));
+    }
+    if (cur) sel.value = cur;
+  }
+}
+
+function renderOriginLegend() {
+  const host = $('#origin-legend');
+  if (!host) return;
+  host.textContent = '';
+  const counts = {};
+  for (const group of [S.cat.signals, S.cat.message_templates, S.cat.conscience_levels,
+                       S.cat.conscience_clauses, S.cat.conditions]) {
+    for (const item of group || []) counts[item.origin] = (counts[item.origin] || 0) + 1;
+  }
+  for (const [name, text] of Object.entries(S.cat.origin_docs || {})) {
+    host.append(el('div', { class: 'origin-row' },
+      el('span', { class: `badge ${name === 'shipped' ? '' : 'local'}` }, name),
+      el('div', {},
+        el('p', {}, text),
+        el('p', { class: 'meta' }, `${counts[name] || 0} definition(s) in the catalogue right now`))));
+  }
+}
+
 function renderTemplates() {
   const host = $('#template-list'); host.textContent = '';
   for (const t of S.cat.message_templates) {
@@ -439,8 +491,33 @@ function renderTemplates() {
             saveCatalogue('/api/message_templates/delete', { id: t.id }, `${t.id} ${revert ? 'reverted' : 'deleted'}`);
           },
         }, '×')),
-      el('p', { class: 'text' }, t.text)));
+      el('p', { class: 'text' }, t.text),
+      t.origin === 'local'
+        ? el('div', { class: 'card-tools' }, promoteButton('message_templates', t.id, 'template'))
+        : null));
   }
+}
+
+/* "It says local - how do I make it part of the system?" This is that: the
+   entry moves out of your overlay and into conditions.yaml, the file the repo
+   ships. The server proves the resolved catalogue is unchanged by the move
+   before it writes, so promoting can only relocate a definition. */
+function promoteButton(kind, name, what) {
+  return el('button', {
+    class: 'btn btn-ghost',
+    title: `move ${name} out of conditions.local.yaml and into conditions.yaml, so it ships with the repo`,
+    onclick: async ev => {
+      ev.stopPropagation();
+      if (!await ask({
+        title: `Move ${name} into conditions.yaml?`,
+        body: `It is in your local overlay now, so only this checkout has it. Moving it writes `
+            + `the ${what} into the catalogue the repo ships, leaving every comment in that file `
+            + `intact. Nothing about what it does changes.`,
+        confirmLabel: 'Move it',
+      })) return;
+      saveCatalogue('/api/promote', { kind, id: name }, `${name} is now in conditions.yaml`);
+    },
+  }, 'Move to conditions.yaml');
 }
 
 /* ------- the signal form, in new or edit mode ------- */
@@ -554,6 +631,13 @@ $('#cond-save').addEventListener('click', async () => {
   } catch (e) { /* toasted */ }
 });
 $('#cond-filter').addEventListener('input', renderConditions);
+$('#jump-channels').addEventListener('click', ev => {
+  ev.preventDefault();
+  $$('.tab').find(b => b.dataset.tab === 'miracles').click();
+  // after the panel is shown AND laid out, or the target has no position yet
+  // and the scroll lands wherever the previous panel left the page
+  setTimeout(() => $('#channel-reference').scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
+});
 $('#cond-defaults-save').addEventListener('click', async () => {
   if (!S.conditions.size) return toast('Tick some conditions first', true);
   try {
@@ -588,7 +672,8 @@ function renderConscienceTab() {
               confirmLabel: revert ? 'Revert' : 'Remove', danger: !revert })) return;
             saveCatalogue('/api/conscience/delete', { id: lv.id }, revert ? `${lv.id} reverted` : `${lv.id} removed`);
           },
-        }, lv.origin === 'edited' ? 'Revert' : 'Delete'))));
+        }, lv.origin === 'edited' ? 'Revert' : 'Delete'),
+        lv.origin === 'local' ? promoteButton('conscience', lv.id, 'level') : null)));
   }
   renderClauseLibrary();
   renderClausePicker();
@@ -611,7 +696,10 @@ function renderClauseLibrary() {
             saveCatalogue('/api/conscience_clauses/delete', { id: c.id }, `${c.id} ${revert ? 'reverted' : 'deleted'}`);
           },
         }, '×')),
-      el('p', { class: 'text' }, c.text)));
+      el('p', { class: 'text' }, c.text),
+      c.origin === 'local'
+        ? el('div', { class: 'card-tools' }, promoteButton('conscience_clauses', c.id, 'clause'))
+        : null));
   }
 }
 
@@ -1092,7 +1180,9 @@ function renderCatalogue() {
     if (!S.cat.conscience_levels.some(l => l.id === id)) S.conscience.delete(id);
   });
   $('#local-path').textContent = S.cat.local_path;
+  $('#base-path').textContent = S.cat.base_path || 'experiments/conditions.yaml';
   renderScenarios(); renderConditions(); renderConscience();
+  renderChannelReference(); renderOriginLegend();
   renderSignals(); renderTemplates(); renderConscienceTab(); renderCount();
 }
 

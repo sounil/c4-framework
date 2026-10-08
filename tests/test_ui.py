@@ -52,6 +52,12 @@ def test_merge_docs_overlays_without_losing_the_base():
     assert doc["default_conditions"] == ["C3"]
 
 
+def overlay_doc(path):
+    """The overlay as a dict. An emptied overlay is deleted rather than left as a
+    header-only file, so "no file" and "nothing in it" are the same thing."""
+    return (yaml.safe_load(path.read_text(encoding="utf-8")) or {}) if path.exists() else {}
+
+
 @pytest.fixture
 def local_overlay(tmp_path, monkeypatch):
     """Point both the writer and the loader at a throwaway overlay file."""
@@ -215,13 +221,14 @@ def test_editing_a_shipped_signal_overrides_it_and_reverting_brings_it_back(loca
 
     ui.delete_signal("deny")
     assert load_catalogue().signals["deny"].rating == 1
-    assert "deny" not in (yaml.safe_load(local_overlay.read_text(encoding="utf-8")) or {}).get("signals", {})
+    assert "deny" not in overlay_doc(local_overlay).get("signals", {})
+    assert not local_overlay.exists()       # nothing left to override, so no file
 
 
 def test_removing_a_locally_added_signal_leaves_no_trace(local_overlay):
     ui.save_signal({"id": "thunder", "status": "⚡", "rating": 7})
     ui.delete_signal("thunder")
-    doc = yaml.safe_load(local_overlay.read_text(encoding="utf-8")) or {}
+    doc = overlay_doc(local_overlay)
     # a local-only signal is gone by being left out; it needs no `remove:` entry,
     # and a stale one would silently block ever adding the name back
     assert "thunder" not in (doc.get("signals") or {})

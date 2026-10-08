@@ -59,7 +59,8 @@
             <button class="chip" data-pick="none">none</button>
           </div>
         </div>
-        <p class="hint">Each condition is a <em>signal</em> (what the world does) carrying a <em>message</em> (what it says) on a <em>channel</em>. Ordered least to most compelling; the number and the id are both derived, so neither needs maintaining.</p>
+        <p class="hint">Each condition is a <em>signal</em> (what the world does) carrying a <em>message</em> (what it says) through a <em>channel</em> (where the words reach the agent). Ordered least to most compelling.</p>
+        <p class="hint id-key">The id spells out those three: <code>signal<b>+</b>message<b>@</b>channel</code> — <code>code_666+redirect</code> is HTTP 666 carrying the redirect in the response body, and <code>permit+none@none</code> is the baseline: nothing is blocked, nothing is said. <code>@channel</code> is left off when it is the usual one, the HTTP response. The <code>C01</code> number is just its rung on the ladder. <a href="#" id="jump-channels">What are the channels?</a></p>
         <div class="row row-tools">
           <input id="cond-filter" type="search" placeholder="filter by signal, message or number" spellcheck="false">
           <button id="cond-defaults-save" class="btn btn-ghost" title="Make the current selection what a run with no --conditions uses">Set as defaults</button>
@@ -212,7 +213,29 @@
       </div>
     </section>
   </div>
-  <p class="hint footnote">Everything written here goes to <code id="local-path"></code> and is merged over <code>conditions.yaml</code>, which keeps its comments. Every edit is checked against the merged catalogue before it is saved, so a broken one is refused here rather than at the next run.</p>
+  <section class="card" id="channel-reference">
+    <h2>Channels <small class="hint">— where the words reach the agent</small></h2>
+    <p class="hint">
+      The channel is the one knob that is not yours to add to. Each of the four decides the
+      <em>moment</em> the instruction becomes available, and every outcome is measured from
+      that moment, so <code>classify.py</code> has a branch per channel. A fifth would need a
+      fifth branch — it is a code change, not a catalogue edit. The four are the C4 quadrants.
+    </p>
+    <div id="channel-list" class="channel-list"></div>
+  </section>
+
+  <section class="card">
+    <h2>Where a definition lives</h2>
+    <p class="hint">
+      Two files make up the catalogue. <code id="base-path"></code> is what the repo ships —
+      clone it anywhere and you get those. <code id="local-path"></code> is yours alone: the
+      control room writes here so the shipped file keeps its comments and its ordering, and it
+      is merged on top, so anything named in both wins here. Every edit is resolved against the
+      merged result before it is written, so a broken one is refused at the form rather than at
+      the next run.
+    </p>
+    <div id="origin-legend" class="origin-legend"></div>
+  </section>
 </main>
 
 <!-- ────────────────────────────── CONSCIENCE ────────────────────────────── -->

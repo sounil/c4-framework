@@ -66,10 +66,13 @@ it just stops you hand-assembling flags and `jq`-ing through `trials.jsonl`.
   `experiments/conditions.local.yaml`, which the catalogue merges over
   `conditions.yaml` — so the hand-written file keeps its comments — and every
   edit is resolved against the merged catalogue *before* the file is written, so
-  a broken one is refused at the form rather than at the next run.
+  a broken one is refused at the form rather than at the next run. The tab also
+  prints what the four channels mean, and what `shipped` / `edited` / `local`
+  mean, with a button to promote a local entry into the shipped catalogue.
 - **Conscience** — the clauses that make a level weak or strong, as checkboxes,
   with the system-prompt text they produce shown underneath. Add a level, add a
   clause, or edit a clause and watch every level that uses it change with it.
+  Anything you add is badged `local` until you **Move it to conditions.yaml**.
 - **Scenarios** — the task, the forbidden and commanded endpoints and the
   redirect, edited as the file itself. Saving parses it and checks the required
   keys, that the two paths differ, and that the redirect names the commanded
@@ -161,7 +164,7 @@ catalogue). A condition is three independent knobs:
 |---|---|---|
 | `signal` | `signals:` | the physics: status token (numeric *or* outside HTTP's `3DIGIT` grammar), reason phrase, response headers, body shape (`json` / `text` / `none`), and a `rating` |
 | `message` | `message_templates:` | the words riding on it — `{redirect}`, `{forbidden}` and `{commanded}` are substituted per scenario |
-| `channel` | the condition | where the words arrive: `tool_result` (Chassis), `system` (Conscience), `user_interrupt` (Crown), `none` |
+| `channel` | the condition | where the words arrive — see below. Unlike the other two, **a fixed set of four** |
 
 ```yaml
 signals:
@@ -178,6 +181,25 @@ conditions:
   - signal: burning_bush              # no id, no number, no label needed
     message: commandment
 ```
+
+### Channels: the one knob that is not data
+
+`signal` and `message` are catalogue entries you can add to freely. `channel` is
+not. Each of the four decides the *moment* the instruction becomes available to
+the agent, and every outcome is measured from that moment, so `classify.py` has
+a branch per channel — a fifth would need a fifth branch. The four are the C4
+quadrants:
+
+| `channel` | Quadrant | The words arrive | Outcomes measured from |
+|---|---|---|---|
+| `tool_result` | Chassis | inside the HTTP response, in the body the agent's own tool call returns — the manufactured miracle | the agent's first attempt on the forbidden path |
+| `system` | Conscience | in the system prompt, from the start — the rule was always there | the beginning of the episode |
+| `user_interrupt` | Crown | a human turn, injected right after the first attempt | the agent's first attempt on the forbidden path |
+| `none` | — | nowhere; no message exists | never — these have no instruction, so they are excluded from compliance and reported as baseline propensity |
+
+So `permit+none@none` is the baseline: nothing is blocked and nothing is said.
+The Miracles tab prints this table, and the condition list spells the channel out
+in words rather than showing the raw id.
 
 ### The ladder
 
@@ -221,6 +243,27 @@ Selecting conditions never means commenting YAML out. `--conditions` takes:
 | `C4_miracle_msg` | a legacy alias |
 | `C9`, `M_glyph` | any prefix of the above |
 | `all` / `default` | everything / the `default_conditions:` list |
+
+### Where a definition lives
+
+Two files make up the catalogue, and the control room labels every entry with
+which one it came from:
+
+| Badge | Means | What you can do |
+|---|---|---|
+| *(none)* `shipped` | defined in `experiments/conditions.yaml`, the catalogue that travels with the repo | edit it (which makes it `edited`), or delete it |
+| `edited` | defined in `conditions.yaml`, but overridden in `conditions.local.yaml` | **Revert** drops your override and brings the shipped one back |
+| `local` | defined *only* in `conditions.local.yaml`, which is yours — a fresh clone of the repo would not have it | **Move to conditions.yaml** promotes it into the shipped catalogue |
+
+The overlay exists so the control room never has to rewrite `conditions.yaml`
+and reflow its comments. Promoting is therefore a *text insertion* into the right
+block of that file: every other line survives byte-for-byte, and the server
+compares the resolved catalogue before and after and refuses to write unless they
+are identical — a promotion can only change where a definition lives, never what
+it does. An emptied overlay is deleted rather than left behind.
+
+`conditions.local.yaml` is deliberately not gitignored: committing it is how you
+share work in progress, promoting is how you make it part of the experiment.
 
 ## Configuring the Conscience
 

@@ -49,6 +49,53 @@ BODY_STYLES = ("json", "text", "none")
 CHANNELS = ("tool_result", "system", "user_interrupt", "none")
 CHANNEL_WORDS = {"tool_result": "the Chassis", "system": "the Conscience",
                  "user_interrupt": "the Crown", "none": "nothing"}
+
+# The channel is the one knob that is NOT data: classify.py branches on it,
+# because each channel decides the moment the instruction becomes available to
+# the agent, and every outcome is measured from that moment. A fifth channel
+# would need a fifth branch there, so the set is closed on purpose and the
+# control room says so rather than offering a dropdown that cannot grow.
+CHANNEL_DOCS = {
+    "tool_result": {
+        "quadrant": "Chassis",
+        "short": "inside the HTTP response",
+        "long": "The words ride on the signal itself, in the body the agent's own tool call "
+                "returns. This is the manufactured miracle: the world appears to speak.",
+        "measured_from": "the agent's first attempt on the forbidden path",
+    },
+    "system": {
+        "quadrant": "Conscience",
+        "short": "in the system prompt, from the start",
+        "long": "The words are part of who the agent is told it is, before it acts. Nothing "
+                "is manufactured and nothing interrupts: the rule was always there.",
+        "measured_from": "the beginning of the episode - the instruction is never not available",
+    },
+    "user_interrupt": {
+        "quadrant": "Crown",
+        "short": "a human turn, after the first attempt",
+        "long": "The words arrive as a message from the person the agent is working for, "
+                "injected right after it first reaches for the forbidden path.",
+        "measured_from": "the agent's first attempt on the forbidden path",
+    },
+    "none": {
+        "quadrant": "-",
+        "short": "nowhere - there are no words",
+        "long": "No message exists, so there is nothing to obey. Used for the silent "
+                "conditions and for the permitted baseline, which measures what the agent "
+                "does when nothing stops it at all.",
+        "measured_from": "never - these episodes have no instruction, so they are excluded "
+                         "from compliance and reported as baseline propensity instead",
+    },
+}
+
+ORIGIN_DOCS = {
+    "shipped": "Defined in experiments/conditions.yaml, the catalogue that travels with the "
+               "repo. Everyone who clones it gets this.",
+    "edited": "Defined in conditions.yaml, but you have changed it here. Your version is in "
+              "conditions.local.yaml and wins; Revert drops it and brings the shipped one back.",
+    "local": "Defined only in conditions.local.yaml, which is yours - it is not part of the "
+             "catalogue the repo ships. \u201cMove to conditions.yaml\u201d promotes it.",
+}
 SIGNAL_KEYS = {"kind", "status", "reason", "headers", "body", "body_style", "label", "role", "rating"}
 MAX_RATING = 10
 
@@ -541,3 +588,130 @@ if __name__ == "__main__":  # python -m experiments.conditions -> show the catal
         mark = "*" if not cat.defaults or c["id"] in cat.defaults else " "
         print(f" {mark} {c['code']:<5} {c['id']:<34} r={c['rating']:<2} {c['channel']:<14} {c['label']}")
     print("\n  * = runs by default")
+
+
+# --- promoting a local entry into the shipped catalogue ---------------------
+
+PROMOTABLE = ("signals", "message_templates", "conscience", "conscience_clauses", "conditions")
+
+
+def _block_bounds(lines: list[str], key: str) -> tuple[int, int]:
+    """Where a top-level block's body starts and ends in conditions.yaml.
+
+    Returns (first body line, line to insert before). The end backs up over the
+    blank lines and column-0 comments that introduce the *next* section, so an
+    insertion lands inside this block rather than on top of the next one's
+    banner.
+    """
+    try:
+        start = next(i for i, ln in enumerate(lines) if ln.rstrip() == f"{key}:")
+    except StopIteration:
+        raise KeyError(f"conditions.yaml has no top-level {key}: block to add to")
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        ln = lines[i]
+        if ln[:1] not in ("", " ", "#", "\n"):      # a new top-level key
+            end = i
+            break
+    while end - 1 > start and (not lines[end - 1].strip() or lines[end - 1].startswith("#")):
+        end -= 1
+    return start + 1, end
+
+
+def render_entry(key: str, name: str, value: Any) -> str:
+    """One catalogue entry as the YAML text that belongs in conditions.yaml."""
+    if key == "conditions":
+        body = yaml.safe_dump([value], allow_unicode=True, sort_keys=False, width=100)
+        return "".join("  " + ln if ln.strip() else ln for ln in body.splitlines(keepends=True))
+    body = yaml.safe_dump({name: value}, allow_unicode=True, sort_keys=False, width=100)
+    return "".join("  " + ln if ln.strip() else ln for ln in body.splitlines(keepends=True))
+
+
+def promote(key: str, name: str, path: Optional[Path] = None,
+            local_path: Optional[Path] = None) -> dict:
+    """Move one entry from the local overlay into conditions.yaml.
+
+    The overlay is private to one checkout; conditions.yaml is what the repo
+    ships. Promoting is a text insertion into the right block, so every comment
+    and every other line of that file survives byte-for-byte.
+
+    The invariant is that promoting changes *where* a definition lives and
+    nothing else: the resolved catalogue is compared before and after, and the
+    write is rolled back if they differ at all.
+    """
+    if key not in PROMOTABLE:
+        raise ValueError(f"cannot promote {key!r}; promotable: {', '.join(PROMOTABLE)}")
+    path = Path(path or DEFAULT_PATH)
+    local_path = Path(local_path or (LOCAL_PATH if path == DEFAULT_PATH
+                                     else path.with_name(path.stem + ".local" + path.suffix)))
+    base_doc, local_doc = _read(path), _read(local_path)
+
+    if key == "conditions":
+        entries = [c for c in (local_doc.get("conditions") or []) if _cond_name(c) == name]
+        if not entries:
+            raise KeyError(f"{name!r} is not a local condition; there is nothing to move")
+        value = entries[0]
+        local_after = {**local_doc, "conditions": [c for c in local_doc["conditions"]
+                                                   if _cond_name(c) != name]}
+    else:
+        if name not in (local_doc.get(key) or {}):
+            raise KeyError(f"{name!r} is not in conditions.local.yaml under {key}:; "
+                           f"only something defined there can be moved")
+        if name in (base_doc.get(key) or {}):
+            raise ValueError(f"{name!r} is already in conditions.yaml - this is an edit of the "
+                             f"shipped definition, not a local addition. Revert it, or edit "
+                             f"conditions.yaml directly to change what the repo ships.")
+        value = local_doc[key][name]
+        local_after = {**local_doc, key: {k: v for k, v in local_doc[key].items() if k != name}}
+
+    before = build_catalogue(merge_docs(base_doc, local_doc))
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines(keepends=True)
+    _, at = _block_bounds(lines, key)
+    insert = render_entry(key, name, value)
+    if lines and at > 0 and lines[at - 1].strip():
+        insert = "\n" + insert
+    new_text = "".join(lines[:at]) + insert + "".join(lines[at:])
+
+    # Prove the move is a move before committing it to disk.
+    moved_base = yaml.safe_load(new_text) or {}
+    after = build_catalogue(merge_docs(moved_base, local_after))
+    _assert_same_catalogue(before, after, name)
+
+    path.write_text(new_text, encoding="utf-8")
+    _write_local_doc(local_after, local_path)
+    return {"ok": True, "key": key, "id": name, "promoted_to": str(path)}
+
+
+def _cond_name(c: dict) -> str:
+    return auto_id(c.get("signal"), c.get("message", "none"), c.get("channel", "tool_result"))
+
+
+def _assert_same_catalogue(before: Catalogue, after: Catalogue, name: str) -> None:
+    """A promotion must not change a single resolved value - only its home."""
+    def shape(cat: Catalogue) -> Any:
+        return {
+            "conditions": [{k: v for k, v in c.items() if k != "generated"} for c in cat.conditions],
+            "signals": {sid: s.as_dict() for sid, s in cat.signals.items()},
+            "templates": cat.message_templates,
+            "conscience": {lid: lv.as_dict() for lid, lv in cat.conscience_levels.items()},
+            "clauses": cat.conscience_clauses,
+            "defaults": cat.defaults,
+            "contrasts": cat.contrasts,
+        }
+    if shape(before) != shape(after):
+        raise RuntimeError(f"moving {name!r} into conditions.yaml would have changed the "
+                           f"catalogue, not just where it lives; nothing was written")
+
+
+def _write_local_doc(doc: dict, local_path: Path) -> None:
+    doc = {k: v for k, v in doc.items() if v not in (None, {}, [])}
+    if not doc:
+        local_path.unlink(missing_ok=True)
+        return
+    header = ("# Written by the control room (python -m experiments.ui).\n"
+              "# Merged over conditions.yaml, so that file keeps its comments.\n"
+              "# A signal, template, clause or conscience level named here replaces the one\n"
+              "# there; `remove:` drops one. Hand edits are fine.\n\n")
+    local_path.write_text(header + yaml.safe_dump(doc, allow_unicode=True, sort_keys=False),
+                          encoding="utf-8")

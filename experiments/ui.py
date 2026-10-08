@@ -56,8 +56,10 @@ import yaml
 
 from . import scenario_store
 from .analyze import analyze, load_run
-from .conditions import (DEFAULT_PATH, LOCAL_PATH, build_catalogue, load_catalogue,
-                         merge_docs, read_doc)
+from .conditions import (CHANNEL_DOCS, CHANNELS, DEFAULT_PATH, LOCAL_PATH, ORIGIN_DOCS,
+                         PROMOTABLE, build_catalogue, load_catalogue, merge_docs, promote,
+                         read_doc)
+from .conditions import _cond_name, _write_local_doc
 from .env import load_env
 from .run import load_scenarios
 
@@ -255,11 +257,31 @@ def run_summary(run_id: str) -> dict:
 # The catalogue, and adding to it
 # --------------------------------------------------------------------------- #
 
+def _rel(path: Path) -> str:
+    """Repo-relative, because that is how these paths get typed and talked about."""
+    try:
+        return str(Path(path).relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
 def _origin(kind: str, name: str) -> str:
     """Where a definition comes from, so the editor can offer the right verb:
-    shipped (revert), edited (revert to shipped), or local (delete)."""
+    shipped (delete), edited (revert to shipped), or local (delete, or promote
+    into conditions.yaml)."""
     in_base = name in (read_doc(DEFAULT_PATH).get(kind) or {})
     in_local = name in (_load_local().get(kind) or {})
+    return "edited" if in_base and in_local else "local" if in_local else "shipped"
+
+
+def _condition_origin(cond: dict) -> str:
+    """A generated grid cell belongs to whichever file its `expand:` block is in,
+    so only hand-written entries can be local or edited."""
+    if cond.get("generated"):
+        return "shipped"
+    names = {_cond_name(c) for c in (read_doc(DEFAULT_PATH).get("conditions") or [])}
+    local_names = {_cond_name(c) for c in (_load_local().get("conditions") or [])}
+    in_base, in_local = cond["id"] in names, cond["id"] in local_names
     return "edited" if in_base and in_local else "local" if in_local else "shipped"
 
 
@@ -273,7 +295,7 @@ def catalogue_payload() -> dict:
         "rating_scale": [{"rating": k, "band": v} for k, v in sorted(cat.rating_scale.items())],
         "message_templates": [{"id": k, "text": v, "origin": _origin("message_templates", k)}
                               for k, v in cat.message_templates.items()],
-        "conditions": cat.conditions,
+        "conditions": [{**c, "origin": _condition_origin(c)} for c in cat.conditions],
         "defaults": cat.defaults,
         "contrasts": [{"a": a, "b": b, "desc": d} for a, b, d in cat.contrasts],
         "key_conditions": cat.key_conditions,
@@ -282,7 +304,10 @@ def catalogue_payload() -> dict:
                               for lid, lv in cat.conscience_levels.items()],
         "conscience_clauses": [{"id": k, "text": v, "origin": _origin("conscience_clauses", k)}
                                for k, v in cat.conscience_clauses.items()],
-        "channels": list(CHANNELS_FOR_UI),
+        "channels": [{"id": ch, **CHANNEL_DOCS[ch]} for ch in CHANNELS],
+        "origin_docs": ORIGIN_DOCS,
+        "promotable": list(PROMOTABLE),
+        "base_path": _rel(DEFAULT_PATH),
         "scenarios": [{"id": s["id"], "title": s.get("title", s["id"]),
                        "harm_class": s.get("harm_class", ""),
                        "forbidden": s["forbidden"].get("example_path", s["forbidden"]["path"]),
@@ -291,7 +316,7 @@ def catalogue_payload() -> dict:
         "env_models": os.environ.get("C4_MODELS", "").split(),
         "env_trials": os.environ.get("C4_TRIALS", "20"),
         "env_concurrency": os.environ.get("C4_CONCURRENCY", "4"),
-        "local_path": str(LOCAL_PATH),
+        "local_path": _rel(LOCAL_PATH),
     }
 
 
@@ -310,21 +335,13 @@ def _save_local(doc: dict) -> None:
     """
     doc = {k: v for k, v in doc.items() if v not in (None, {}, [])}
     build_catalogue(merge_docs(read_doc(DEFAULT_PATH), doc))
-    header = ("# Written by the control room (python -m experiments.ui).\n"
-              "# Merged over conditions.yaml, so that file keeps its comments.\n"
-              "# A signal, template, clause or conscience level named here replaces the one\n"
-              "# there; `remove:` drops one. Hand edits are fine.\n\n")
-    LOCAL_PATH.write_text(header + yaml.safe_dump(doc, allow_unicode=True, sort_keys=False),
-                          encoding="utf-8")
+    _write_local_doc(doc, LOCAL_PATH)
 
 
 def _clean(keys: dict) -> dict:
     """Keep the keys that carry something; drop the blanks so the overlay stays
     readable and a cleared field falls back to the shipped definition."""
     return {k: v for k, v in keys.items() if v not in (None, "", {}, [])}
-
-
-CHANNELS_FOR_UI = ("tool_result", "system", "user_interrupt", "none")
 
 
 def _mark_removed(doc: dict, kind: str, name: str, removed: bool) -> None:
@@ -545,6 +562,15 @@ add_template = save_template
 add_condition = save_condition
 
 
+def promote_entry(kind: str, name: str) -> dict:
+    """Move a local definition into conditions.yaml - the file the repo ships.
+
+    This is the answer to "it says local, how do I make it part of the system":
+    the overlay is private to this checkout, conditions.yaml is shared.
+    """
+    return promote(kind, name, path=DEFAULT_PATH, local_path=LOCAL_PATH)
+
+
 def read_presets() -> list[dict]:
     if PRESETS.exists():
         try:
@@ -692,6 +718,8 @@ class Handler(BaseHTTPRequestHandler):
                 return saved(delete_condition(body["id"]))
             if path == "/api/conditions/defaults":
                 return saved(set_defaults(body.get("ids") or []))
+            if path == "/api/promote":
+                return saved(promote_entry(body["kind"], body["id"]))
             if path == "/api/conscience":
                 return saved(save_conscience(body))
             if path == "/api/conscience/delete":

@@ -296,3 +296,31 @@ dialog.ask::backdrop { background: rgba(0,0,0,.42); }
 .ask-body label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 14px; }
 .ask-body label input { width: 100%; margin-top: 5px; font-family: var(--mono); }
 .ask-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+/* ───────── the channel reference ─────────
+   Four fixed values that each mean a different measurement, so they get prose
+   rather than a dropdown you have to guess at. */
+.channel-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px; }
+.channel { border: 1px solid var(--ring); border-radius: var(--r); padding: 10px 12px;
+  background: var(--plane); }
+.channel-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.channel-head code { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--ink); }
+.channel-head .meta { color: var(--muted); font-size: 11px; }
+.channel .role { margin: 0 0 6px; }
+.channel .measured { margin: 0; font-size: 11px; color: var(--ink-2); line-height: 1.5; }
+
+/* ───────── where a definition lives ───────── */
+.origin-legend { display: flex; flex-direction: column; gap: 10px; }
+.origin-row { display: grid; grid-template-columns: 76px 1fr; gap: 12px; align-items: start; }
+.origin-row p { margin: 0; font-size: 12px; color: var(--ink-2); line-height: 1.55; }
+.origin-row .meta { color: var(--muted); font-size: 11px; }
+.id-key { line-height: 1.6; }
+.id-key code { font-size: 11px; }
+.id-key b { color: var(--series-1); }
+.id-key a { color: var(--series-1); }
+
+/* The Conscience picker sits in the settings grid, where the clause count has
+   no room to wrap onto its own line. */
+.checks.inline { display: flex; flex-wrap: wrap; gap: 14px; align-items: baseline; }
+.checks.inline .check { white-space: nowrap; }
+.checks.inline .check .meta { white-space: nowrap; }
