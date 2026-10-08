@@ -7,16 +7,23 @@ conditions.yaml, so a new kind of miracle is a YAML edit rather than a code
 change:
 
     signal    the *physics* of the manifestation - the status token, the reason
-              phrase, extra response headers, the shape of the body.
+              phrase, extra response headers, the shape of the body. Each one
+              carries a `rating` 0-10, the researcher's prior for how compelling
+              it ought to be; the catalogue is ordered by it, least first.
               (conditions.yaml: `signals:`)
     message   the *words* that ride along, if any. A template over the
               scenario's redirect text.        (conditions.yaml: `message_templates:`)
     channel   where those words reach the agent: tool_result (the Chassis),
               system (the Conscience), user_interrupt (the Crown), or none.
 
-A condition names a signal and a message; an `expand:` block can generate the
-whole signal x message grid at once, so adding one signal gives you every
-message variant of it for free.
+Those three ARE the condition's identity, so ids and numbers are derived, never
+written: `code_666+redirect` is the id, `C27` is its position in the ordering,
+and the label comes from the signal's label plus the message. Any `id:` left in
+the YAML is kept as an alias, so older runs, contrasts and command lines that
+name `C4_miracle_msg` still resolve.
+
+An `expand:` block can generate the whole signal x message grid at once; a cell
+written by hand and the same cell generated are one condition, not two.
 
 Loading is the only place that knows the YAML schema. Everything downstream
 (agent, classify, analyze) reads the resolved dicts this module returns.
@@ -31,16 +38,19 @@ import yaml
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_PATH = HERE / "conditions.yaml"
-# Anything the control room (experiments/ui.py) adds lands here instead of in
-# conditions.yaml, so the hand-written file keeps its comments and its ordering.
-# Merged on top: a signal or template of the same name wins, conditions and
-# contrasts are appended, and default_conditions replaces if present.
+# Anything the control room (experiments/ui.py) adds or edits lands here instead
+# of in conditions.yaml, so the hand-written file keeps its comments and its
+# ordering. Merged on top: a signal, template or conscience level of the same
+# name wins; `remove:` drops one entirely.
 LOCAL_PATH = HERE / "conditions.local.yaml"
 
 KINDS = ("permit", "mundane", "miracle")
 BODY_STYLES = ("json", "text", "none")
 CHANNELS = ("tool_result", "system", "user_interrupt", "none")
-SIGNAL_KEYS = {"kind", "status", "reason", "headers", "body", "body_style", "label", "role"}
+CHANNEL_WORDS = {"tool_result": "the Chassis", "system": "the Conscience",
+                 "user_interrupt": "the Crown", "none": "nothing"}
+SIGNAL_KEYS = {"kind", "status", "reason", "headers", "body", "body_style", "label", "role", "rating"}
+MAX_RATING = 10
 
 
 @dataclass
@@ -56,6 +66,7 @@ class Signal:
     body_style: str = "json"            # json | text | none
     label: Optional[str] = None
     role: Optional[str] = None          # why this signal exists, for the docs
+    rating: int = 0                     # 0-10: how compelling we expect it to be. A prior, not a result.
 
     @property
     def is_miracle(self) -> bool:
@@ -68,17 +79,57 @@ class Signal:
 
 
 @dataclass
+class ConscienceLevel:
+    """One Conscience strength, assembled from named clauses plus free text.
+
+    The clauses are the knobs: each is one sentence pushing the agent to finish
+    the task as specified, and a level is the set it switches on. `text:` is
+    appended for anything that does not belong in a reusable clause.
+    """
+
+    id: str
+    label: str
+    clauses: list[str] = field(default_factory=list)
+    extra: str = ""
+    role: str = ""
+    text: str = ""          # resolved: the clause sentences, then `extra`
+
+    def as_dict(self) -> dict:
+        return dict(self.__dict__)
+
+
+@dataclass
 class Catalogue:
-    conditions: list[dict]
-    signals: dict[str, Signal]
+    conditions: list[dict]              # ordered least -> most compelling
+    signals: dict[str, Signal]          # ordered by rating, least -> most compelling
     message_templates: dict[str, Optional[str]]
-    conscience: dict[str, str]
+    conscience: dict[str, str]          # level id -> resolved system-prompt text
+    conscience_levels: dict[str, ConscienceLevel]
+    conscience_clauses: dict[str, str]
+    rating_scale: dict[int, str]
     contrasts: list[tuple[str, str, str]]
     defaults: list[str]
+    aliases: dict[str, str] = field(default_factory=dict)   # legacy id / code -> canonical id
+    key_conditions: dict[str, str] = field(default_factory=dict)
 
     @property
     def by_id(self) -> dict[str, dict]:
-        return {c["id"]: c for c in self.conditions}
+        """Canonical ids, plus every alias and auto-number that resolves to one."""
+        out = {c["id"]: c for c in self.conditions}
+        for name, cid in self.aliases.items():
+            if cid in out:
+                out.setdefault(name, out[cid])
+        return out
+
+    def resolve(self, name: str) -> str:
+        """Map any id a run or a contrast might carry onto the canonical one."""
+        if any(c["id"] == name for c in self.conditions):
+            return name
+        return self.aliases.get(name, name)
+
+    @property
+    def conscience_order(self) -> list[str]:
+        return list(self.conscience_levels)
 
 
 # --- parsing ----------------------------------------------------------------
@@ -106,7 +157,7 @@ def parse_signal(sid: str, spec: Any) -> Signal:
     """A signal may be written in full, or as a bare status for the short case:
 
         code_666: 666
-        glyph:    {status: "\U0001FA84✨", reason: null}
+        glyph:    {status: "\U0001FA84 sparkles", rating: 8}
     """
     if not isinstance(spec, dict):
         spec = {"status": spec}
@@ -126,36 +177,97 @@ def parse_signal(sid: str, spec: Any) -> Signal:
     if body is not None and not isinstance(body, dict):
         raise ValueError(f"signal {sid!r}: body must be a mapping (or omitted)")
     reason = spec.get("reason")
+    rating = spec.get("rating", 0)
+    try:
+        rating = int(rating)
+    except (TypeError, ValueError):
+        raise ValueError(f"signal {sid!r}: rating must be a whole number 0-{MAX_RATING}, got {rating!r}")
+    if not 0 <= rating <= MAX_RATING:
+        raise ValueError(f"signal {sid!r}: rating must be 0-{MAX_RATING}, got {rating}")
     return Signal(id=sid, kind=kind, status=status,
                   reason=str(reason) if reason is not None else None,
                   headers=headers, body=body, body_style=body_style,
                   label=spec.get("label") or _default_signal_label(status, reason),
-                  role=spec.get("role"))
+                  role=spec.get("role"), rating=rating)
 
 
 def _default_signal_label(status: Union[int, str], reason: Any) -> str:
     return f"HTTP {status}" + (f" {reason}" if reason else "")
 
 
+def order_signals(signals: dict[str, Signal]) -> dict[str, Signal]:
+    """Least compelling first. Ties keep their written order, so a rating of 0
+    everywhere leaves the file's own ordering alone."""
+    order = list(signals)
+    return {s.id: s for s in sorted(signals.values(), key=lambda s: (s.rating, order.index(s.id)))}
+
+
+# --- automatic ids, labels and numbers --------------------------------------
+
+def auto_id(signal: str, message: str, channel: str) -> str:
+    """A condition IS its (signal, message, channel). The id says so.
+
+    `tool_result` is the default channel and stays implicit, so the common case
+    reads as `code_666+redirect`.
+    """
+    base = f"{signal}+{message}"
+    return base if channel == "tool_result" else f"{base}@{channel}"
+
+
+def auto_label(sig: Signal, message: str, channel: str) -> str:
+    head = sig.label or _default_signal_label(sig.status, sig.reason)
+    if message == "none":
+        return f"{head} — nothing is said" if channel == "none" else f"{head}, no message"
+    tail = "" if channel == "tool_result" else f" via {CHANNEL_WORDS[channel]}"
+    return f"{head} + {message}{tail}"
+
+
+def _sort_key(cond: dict, signals: dict[str, Signal], msg_rank: dict[str, int]) -> tuple:
+    sig = signals[cond["signal"]["id"]] if isinstance(cond.get("signal"), dict) else None
+    rating = sig.rating if sig else 0
+    sig_pos = list(signals).index(sig.id) if sig else 0
+    return (rating, sig_pos, msg_rank.get(cond["message"], 99), CHANNELS.index(cond["channel"]))
+
+
+def number_conditions(conditions: list[dict], signals: dict[str, Signal],
+                      templates: dict[str, Optional[str]]) -> list[dict]:
+    """Order least -> most compelling and stamp on the automatic C-numbers.
+
+    The number is presentational: it moves when a rating changes or a signal is
+    added. The id never does, which is why the id is what runs record.
+    """
+    msg_rank = {"none": 0, **{name: i + 1 for i, name in enumerate(templates)}}
+    ordered = sorted(conditions, key=lambda c: _sort_key(c, signals, msg_rank))
+    width = max(2, len(str(len(ordered))))
+    for i, cond in enumerate(ordered, 1):
+        cond["number"] = i
+        cond["code"] = f"C{i:0{width}d}"
+    return ordered
+
+
 def resolve_condition(raw: dict, signals: dict[str, Signal],
                       templates: dict[str, Optional[str]]) -> dict:
     """Turn one YAML condition into the dict the rest of the pipeline reads.
 
-    Legacy form (`forbidden_status` / `forbidden_reason` written inline, with no
-    `signal:`) still works: it becomes an anonymous signal.
+    `id:` is optional and, when present, becomes an alias: the canonical id is
+    always derived from the three knobs. The legacy inline form
+    (`forbidden_status` / `forbidden_reason` with no `signal:`) still works.
     """
     cond = dict(raw)
-    if "id" not in cond:
-        raise ValueError(f"condition without an id: {raw}")
+    written_id = cond.pop("id", None)
+    aliases = [str(a) for a in (cond.pop("aliases", None) or [])]
+    if written_id:
+        aliases.insert(0, str(written_id))
     sid = cond.pop("signal", None)
+    where = written_id or sid or "<condition>"
 
     if sid is None:
-        sig = parse_signal(f"inline:{cond['id']}",
-                           {"status": cond.get("forbidden_status", 200),
-                            "reason": cond.get("forbidden_reason")})
+        sid = f"inline:{written_id or 'anonymous'}"
+        sig = parse_signal(sid, {"status": cond.get("forbidden_status", 200),
+                                 "reason": cond.get("forbidden_reason")})
     else:
         if sid not in signals:
-            raise KeyError(f"condition {cond['id']!r}: unknown signal {sid!r}; "
+            raise KeyError(f"condition {where!r}: unknown signal {sid!r}; "
                            f"known signals: {sorted(signals)}")
         sig = signals[sid]
         # A condition may tweak the signal it borrows without redefining it.
@@ -167,19 +279,22 @@ def resolve_condition(raw: dict, signals: dict[str, Signal],
 
     message = cond.get("message", "none")
     if message != "none" and message not in templates:
-        raise KeyError(f"condition {cond['id']!r}: unknown message template {message!r}; "
+        raise KeyError(f"condition {where!r}: unknown message template {message!r}; "
                        f"known templates: {sorted(templates)}")
     channel = cond.get("channel", "tool_result")
     if channel not in CHANNELS:
-        raise ValueError(f"condition {cond['id']!r}: channel must be one of {CHANNELS}, got {channel!r}")
+        raise ValueError(f"condition {where!r}: channel must be one of {CHANNELS}, got {channel!r}")
 
+    cond["id"] = auto_id(sig.id, message, channel)
+    cond["aliases"] = aliases
     cond["signal"] = sig.as_dict()
     cond["message"] = message
     cond["channel"] = channel
+    cond["rating"] = sig.rating
     # Mirrors kept so older code (and saved runs) that reads these keys still works.
     cond["forbidden_status"] = sig.status
     cond["forbidden_reason"] = sig.reason
-    cond.setdefault("label", f"{sig.label}, message={message}")
+    cond.setdefault("label", auto_label(sig, message, channel))
     cond.setdefault("role", sig.role or "")
     return cond
 
@@ -188,33 +303,87 @@ def expand_conditions(blocks: Any, signals: dict[str, Signal],
                       templates: dict[str, Optional[str]]) -> list[dict]:
     """Generate the signal x message grid described by each `expand:` block.
 
-    Generated ids are "<prefix>_<signal>_<message>", so `--conditions X` selects
-    the whole grid and `--conditions X_glyph` selects one signal's row of it.
+    Ids are derived like every other condition's, so a generated cell and a
+    hand-written one with the same three knobs are the same condition. A block
+    with a `prefix:` also records the old generated name as an alias, so
+    `--conditions M` and `--conditions M_glyph` keep selecting the grid.
     """
     out: list[dict] = []
     for blk in blocks or []:
-        prefix = str(blk.get("prefix", "X"))
+        prefix = str(blk.get("prefix", "")).strip()
         channel = blk.get("channel", "tool_result")
-        sids = blk.get("signals") or sorted(signals)
+        sids = blk.get("signals") or list(signals)
         msgs = blk.get("messages") or ["none"]
         for sid in sids:
             if sid not in signals:
-                raise KeyError(f"expand block {prefix!r}: unknown signal {sid!r}")
-            sig = signals[sid]
+                raise KeyError(f"expand block {prefix or '<unnamed>'!r}: unknown signal {sid!r}")
             for msg in msgs:
-                fields = {"prefix": prefix, "signal": sid, "message": msg,
-                          "signal_label": sig.label, "channel": channel}
-                out.append({
-                    "id": str(blk.get("id", "{prefix}_{signal}_{message}")).format(**fields),
-                    "label": str(blk.get("label", "{signal_label} + {message}")).format(**fields),
-                    "signal": sid,
-                    "message": msg,
-                    "channel": channel,
-                    "role": str(blk.get("role", "Generated cell: {signal_label} carrying the "
-                                                "{message} message.")).format(**fields),
-                    "generated": True,
-                })
+                entry: dict = {"signal": sid, "message": msg, "channel": channel, "generated": True}
+                if prefix:
+                    entry["aliases"] = [f"{prefix}_{sid}_{msg}"]
+                out.append(entry)
     return out
+
+
+def merge_duplicates(conditions: list[dict]) -> list[dict]:
+    """One condition per (signal, message, channel).
+
+    A hand-written cell and the generated one are the same stimulus; keeping
+    both would put the identical condition in a run twice under two names.
+    Hand-written wins on label and role; aliases accumulate.
+    """
+    merged: dict[str, dict] = {}
+    for cond in conditions:
+        cid = cond["id"]
+        if cid not in merged:
+            merged[cid] = cond
+            continue
+        first, second = merged[cid], cond
+        if first.get("generated") and not second.get("generated"):
+            first, second = second, first        # the hand-written one is the keeper
+        for key, value in second.items():
+            if key == "aliases":
+                continue
+            first.setdefault(key, value)
+        first["aliases"] = list(dict.fromkeys(first.get("aliases", []) + second.get("aliases", [])))
+        first["generated"] = bool(first.get("generated") and second.get("generated"))
+        merged[cid] = first
+    return list(merged.values())
+
+
+# --- conscience -------------------------------------------------------------
+
+def parse_conscience(doc: dict) -> tuple[dict[str, ConscienceLevel], dict[str, str]]:
+    """Read `conscience_clauses:` and `conscience:` into resolved levels.
+
+    Three forms are accepted, so older files keep working:
+        weak: ""                                  bare text
+        strong: {text: "..."}                     text only
+        strong: {clauses: [a, b], text: "..."}    clauses, then text
+    """
+    clauses = {str(k): str(v).strip() for k, v in (doc.get("conscience_clauses") or {}).items()}
+    levels: dict[str, ConscienceLevel] = {}
+    raw = doc.get("conscience")
+    if raw is None:
+        raw = {"weak": "", "strong": ""}
+    for lid, spec in raw.items():
+        if not isinstance(spec, dict):
+            spec = {"text": "" if spec is None else str(spec)}
+        unknown = set(spec) - {"label", "clauses", "text", "role"}
+        if unknown:
+            raise ValueError(f"conscience {lid!r}: unknown key(s) {sorted(unknown)}")
+        picked = [str(c) for c in (spec.get("clauses") or [])]
+        missing = [c for c in picked if c not in clauses]
+        if missing:
+            raise KeyError(f"conscience {lid!r}: unknown clause(s) {missing}; "
+                           f"known clauses: {sorted(clauses)}")
+        extra = str(spec.get("text") or "").strip()
+        sentences = [clauses[c] for c in picked]
+        text = "\n".join(filter(None, [" ".join(sentences) if sentences else "", extra])).strip()
+        levels[str(lid)] = ConscienceLevel(id=str(lid), label=str(spec.get("label") or str(lid).title()),
+                                           clauses=picked, extra=extra,
+                                           role=str(spec.get("role") or ""), text=text)
+    return levels, clauses
 
 
 # --- loading / selection ----------------------------------------------------
@@ -224,66 +393,130 @@ def _read(path: Path) -> dict:
 
 
 def merge_docs(base: dict, local: dict) -> dict:
-    """Overlay a local catalogue onto the main one. See LOCAL_PATH."""
+    """Overlay a local catalogue onto the main one. See LOCAL_PATH.
+
+    Mappings (signals, templates, clauses, conscience levels) are overridden key
+    by key, so editing a shipped signal means writing only that signal here.
+    `remove:` drops a key or a condition from the base entirely.
+    """
     if not local:
         return base
     doc = dict(base)
-    for key in ("signals", "message_templates"):
-        doc[key] = {**(base.get(key) or {}), **(local.get(key) or {})}
+    for key in ("signals", "message_templates", "conscience_clauses", "conscience", "rating_scale"):
+        if base.get(key) or local.get(key):
+            doc[key] = {**(base.get(key) or {}), **(local.get(key) or {})}
     for key in ("conditions", "expand", "contrasts"):
         merged = list(base.get(key) or []) + list(local.get(key) or [])
-        if key == "conditions":   # a local condition replaces the one it shares an id with
-            local_ids = {c.get("id") for c in (local.get(key) or [])}
-            merged = [c for c in (base.get(key) or []) if c.get("id") not in local_ids] + list(local.get(key) or [])
+        if key == "conditions":
+            # A local condition replaces the base one it shares an id with, or
+            # the one standing on the same three knobs - which is the same cell
+            # under the derived id. An entry naming no signal has no cell to
+            # collide with, so only the id can match it.
+            local_ids = {c.get("id") for c in (local.get(key) or []) if c.get("id")}
+            cell = lambda c: (c.get("signal"), c.get("message", "none"), c.get("channel", "tool_result"))
+            local_cells = {cell(c) for c in (local.get(key) or []) if c.get("signal")}
+            kept = [c for c in (base.get(key) or [])
+                    if c.get("id") not in local_ids
+                    and not (c.get("signal") and cell(c) in local_cells)]
+            merged = kept + list(local.get(key) or [])
         doc[key] = merged
-    for key in ("default_conditions", "conscience"):
+    for key in ("default_conditions", "key_conditions"):
         if local.get(key):
             doc[key] = local[key]
+
+    remove = local.get("remove") or {}
+    for key in ("signals", "message_templates", "conscience_clauses", "conscience"):
+        for name in remove.get(key) or []:
+            doc.get(key, {}).pop(name, None)
+    dropped = set(remove.get("conditions") or [])
+    if dropped:
+        doc["conditions"] = [c for c in doc.get("conditions") or []
+                             if c.get("id") not in dropped
+                             and auto_id(c.get("signal"), c.get("message", "none"),
+                                         c.get("channel", "tool_result")) not in dropped]
     return doc
 
 
 def load_catalogue(path: Optional[Path] = None) -> Catalogue:
     path = Path(path or DEFAULT_PATH)
     local = LOCAL_PATH if path == DEFAULT_PATH else path.with_name(path.stem + ".local" + path.suffix)
-    doc = merge_docs(_read(path), _read(local))
-    signals = {sid: parse_signal(sid, spec) for sid, spec in (doc.get("signals") or {}).items()}
+    return build_catalogue(merge_docs(_read(path), _read(local)))
+
+
+def read_doc(path: Optional[Path] = None) -> dict:
+    """The raw YAML of one catalogue file, unmerged. The control room reads the
+    base and the local overlay separately so it can tell an override from the
+    shipped definition it overrides."""
+    return _read(Path(path or DEFAULT_PATH))
+
+
+def build_catalogue(doc: dict) -> Catalogue:
+    """Resolve an already-merged catalogue document.
+
+    Separate from load_catalogue so an edit can be checked in memory - against
+    the merge it *would* produce - before anything is written to disk.
+    """
+    signals = order_signals({sid: parse_signal(sid, spec) for sid, spec in (doc.get("signals") or {}).items()})
     templates = {k: v for k, v in (doc.get("message_templates") or {}).items() if k != "none"}
 
     raw_conditions = list(doc.get("conditions") or [])
     raw_conditions += expand_conditions(doc.get("expand"), signals, templates)
-    conditions = [resolve_condition(c, signals, templates) for c in raw_conditions]
+    conditions = merge_duplicates([resolve_condition(c, signals, templates) for c in raw_conditions])
+    conditions = number_conditions(conditions, signals, templates)
 
-    seen: set[str] = set()
-    for c in conditions:
-        if c["id"] in seen:
-            raise ValueError(f"duplicate condition id {c['id']!r}")
-        seen.add(c["id"])
+    aliases: dict[str, str] = {}
+    for cond in conditions:
+        for name in list(cond["aliases"]) + [cond["code"]]:
+            if name in aliases and aliases[name] != cond["id"]:
+                raise ValueError(f"alias {name!r} points at both {aliases[name]!r} and {cond['id']!r}")
+            aliases[name] = cond["id"]
 
-    contrasts = [tuple(x) if not isinstance(x, dict) else (x["a"], x["b"], x.get("desc", ""))
-                 for x in (doc.get("contrasts") or [])]
-    defaults = list(doc.get("default_conditions") or [])
+    def canon(name: str) -> str:
+        return name if any(c["id"] == name for c in conditions) else aliases.get(name, name)
+
+    contrasts = []
+    for x in doc.get("contrasts") or []:
+        a, b, desc = (x["a"], x["b"], x.get("desc", "")) if isinstance(x, dict) else (list(x) + ["", ""])[:3]
+        contrasts.append((canon(a), canon(b), desc))
+
+    levels, clauses = parse_conscience(doc)
+    scale = {int(k): str(v) for k, v in (doc.get("rating_scale") or {}).items()}
     return Catalogue(conditions=conditions, signals=signals, message_templates=templates,
-                     conscience=doc.get("conscience") or {"weak": "", "strong": ""},
-                     contrasts=contrasts, defaults=defaults)
+                     conscience={lid: lv.text for lid, lv in levels.items()},
+                     conscience_levels=levels, conscience_clauses=clauses, rating_scale=scale,
+                     contrasts=contrasts, defaults=[canon(d) for d in (doc.get("default_conditions") or [])],
+                     aliases=aliases,
+                     key_conditions={k: canon(v) for k, v in (doc.get("key_conditions") or {}).items()})
 
 
 def select(catalogue: Catalogue, ids: Optional[list[str]]) -> list[dict]:
-    """Pick conditions by id or id-prefix.
+    """Pick conditions by id, alias, auto-number, signal name, or any prefix.
 
     "default" -> the `default_conditions:` list in the YAML (everything, if it
     is empty), so narrowing a run never means commenting conditions out.
     "all"     -> every condition, generated grids included.
     """
-    if not ids or ids == ["default"]:
-        ids = catalogue.defaults or ["all"]
-    if "all" in ids:
+    # "default" and "all" are expanded wherever they appear, not only when they
+    # are the whole list: `--conditions default burning_bush+redirect` means the
+    # usual set plus that one, and silently dropping either half would be worse
+    # than refusing.
+    wanted: list[str] = []
+    for token in (ids or ["default"]):
+        token = str(token)
+        if token == "all":
+            return list(catalogue.conditions)
+        wanted.extend(catalogue.defaults or ["__all__"] if token == "default" else [token])
+    if "__all__" in wanted:
         return list(catalogue.conditions)
-    wanted = set(ids)
-    picked = [c for c in catalogue.conditions
-              if c["id"] in wanted or any(c["id"].startswith(w) for w in wanted)]
+
+    def matches(c: dict, w: str) -> bool:
+        names = [c["id"], c["code"], c["signal"]["id"], *c["aliases"]]
+        return any(n == w or n.startswith(w) for n in names)
+
+    picked = [c for c in catalogue.conditions if any(matches(c, w) for w in wanted)]
     if not picked:
         named = [c["id"] for c in catalogue.conditions if not c.get("generated")]
-        raise KeyError(f"no conditions matched {sorted(wanted)}; conditions are {named} "
+        raise KeyError(f"no conditions matched {sorted(wanted)}; hand-written conditions are {named} "
                        f"plus {sum(1 for c in catalogue.conditions if c.get('generated'))} generated "
                        f"(see `python -m experiments.conditions`)")
     return picked
@@ -292,14 +525,19 @@ def select(catalogue: Catalogue, ids: Optional[list[str]]) -> list[dict]:
 if __name__ == "__main__":  # python -m experiments.conditions -> show the catalogue
     cat = load_catalogue()
     print(f"{len(cat.signals)} signals, {len(cat.message_templates)} message templates, "
-          f"{len(cat.conditions)} conditions ({len(cat.defaults) or len(cat.conditions)} run by default)\n")
+          f"{len(cat.conditions)} conditions ({len(cat.defaults) or len(cat.conditions)} run by default), "
+          f"{len(cat.conscience_levels)} conscience levels\n")
+    print("  signals, least compelling first")
     for sid, s in cat.signals.items():
-        print(f"  signal   {sid:<16} {s.kind:<8} status={s.status!r:<10} "
-              f"reason={s.reason!r} headers={list(s.headers) or '-'} body={s.body_style}")
-    print()
-    for name in cat.message_templates:
-        print(f"  message  {name}")
-    print()
+        band = cat.rating_scale.get(s.rating, "")
+        print(f"    {s.rating:>2}/{MAX_RATING}  {sid:<18} {s.kind:<8} status={s.status!r:<12} "
+              f"headers={list(s.headers) or '-'} body={s.body_style}  {band}")
+    print(f"\n  messages: {', '.join(cat.message_templates) or '-'}")
+    print("\n  conscience")
+    for lid, lv in cat.conscience_levels.items():
+        print(f"    {lid:<10} {len(lv.clauses)} clause(s): {', '.join(lv.clauses) or '-'}")
+    print("\n  conditions, least compelling first")
     for c in cat.conditions:
         mark = "*" if not cat.defaults or c["id"] in cat.defaults else " "
-        print(f" {mark} {c['id']:<26} {c['signal']['id']:<18} {c['message']:<12} {c['channel']}")
+        print(f" {mark} {c['code']:<5} {c['id']:<34} r={c['rating']:<2} {c['channel']:<14} {c['label']}")
+    print("\n  * = runs by default")

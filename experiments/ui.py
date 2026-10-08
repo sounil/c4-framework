@@ -10,12 +10,19 @@ Three things it does that the CLI makes you do by hand:
   * compose a run     - pick models, scenarios, conditions, Conscience levels and
                         the trial settings, save the lot as a named preset, see
                         the episode count before you spend anything.
-  * manage miracles   - browse the signal catalogue with a preview of the exact
-                        bytes each one puts on the wire, and add new signals,
-                        message templates and conditions. Anything added here is
-                        written to experiments/conditions.local.yaml, which the
-                        catalogue merges over conditions.yaml - so the
-                        hand-written file keeps its comments and its structure.
+  * manage miracles   - browse the signal catalogue, ordered least to most
+                        compelling, with a preview of the exact bytes each one
+                        puts on the wire; edit any of them, rate them, and add
+                        or edit message templates and conditions. Anything
+                        written here goes to experiments/conditions.local.yaml,
+                        which the catalogue merges over conditions.yaml - so the
+                        hand-written file keeps its comments and its structure,
+                        and every edit is checked against the merged catalogue
+                        before it is saved.
+  * tune the Conscience - switch the clauses that make a level weak or strong,
+                        and read the system prompt they produce.
+  * edit scenarios    - the task, the forbidden and commanded endpoints and the
+                        redirect, validated before the file is written.
   * read the results  - aggregate tables and charts for a run (reusing
                         analyze.py, so the numbers are the report's numbers),
                         then any single episode in full: system prompt,
@@ -47,8 +54,10 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import yaml
 
+from . import scenario_store
 from .analyze import analyze, load_run
-from .conditions import LOCAL_PATH, load_catalogue
+from .conditions import (DEFAULT_PATH, LOCAL_PATH, build_catalogue, load_catalogue,
+                         merge_docs, read_doc)
 from .env import load_env
 from .run import load_scenarios
 
@@ -169,11 +178,21 @@ def run_index() -> list[dict]:
 
 
 def trial_rows(run_id: str, filters: dict) -> list[dict]:
-    """A compact row per episode - enough to filter and scan, not the transcript."""
+    """A compact row per episode - enough to filter and scan, not the transcript.
+
+    Condition ids are canonicalised the way analyze does, so a run recorded
+    before ids became automatic filters by the same name the Results tab shows.
+    """
     path = RUNS / run_id / "trials.jsonl"
     rows = []
     if not path.exists():
         return rows
+    cat = load_catalogue()
+    codes = {c["id"]: c["code"] for c in cat.conditions}
+    # Filter values go through the same mapping as the rows, so picking a run's
+    # own recorded id out of a dropdown matches the canonical id it became.
+    filters = {k: ([cat.resolve(v) for v in vs] if k == "condition" else vs)
+               for k, vs in filters.items()}
     with open(path, encoding="utf-8") as f:
         for line in f:
             if not line.strip():
@@ -183,6 +202,8 @@ def trial_rows(run_id: str, filters: dict) -> list[dict]:
             except json.JSONDecodeError:
                 continue
             o = r.get("outcome", {})
+            r["condition_as_run"] = r.get("condition")
+            r["condition"] = cat.resolve(r.get("condition", ""))
             if any(filters.get(k) and r.get(k) not in filters[k]
                    for k in ("model", "scenario", "condition", "conscience")):
                 continue
@@ -195,7 +216,8 @@ def trial_rows(run_id: str, filters: dict) -> list[dict]:
                     continue
             rows.append({
                 "trial_id": r.get("trial_id"), "model": r.get("model"), "scenario": r.get("scenario"),
-                "condition": r.get("condition"), "signal": r.get("signal"), "message": r.get("message"),
+                "condition": r.get("condition"), "code": codes.get(r.get("condition"), ""),
+                "signal": r.get("signal"), "message": r.get("message"),
                 "conscience": r.get("conscience"), "seed": r.get("seed"), "turns": r.get("turns"),
                 "duration_s": r.get("duration_s"), "error": r.get("error"),
                 "complied": o.get("complied"), "persisted": o.get("persisted"),
@@ -233,16 +255,34 @@ def run_summary(run_id: str) -> dict:
 # The catalogue, and adding to it
 # --------------------------------------------------------------------------- #
 
+def _origin(kind: str, name: str) -> str:
+    """Where a definition comes from, so the editor can offer the right verb:
+    shipped (revert), edited (revert to shipped), or local (delete)."""
+    in_base = name in (read_doc(DEFAULT_PATH).get(kind) or {})
+    in_local = name in (_load_local().get(kind) or {})
+    return "edited" if in_base and in_local else "local" if in_local else "shipped"
+
+
 def catalogue_payload() -> dict:
     cat = load_catalogue()
     scenarios = load_scenarios(["all"])
     return {
-        "signals": [s.as_dict() for s in cat.signals.values()],
-        "message_templates": [{"id": k, "text": v} for k, v in cat.message_templates.items()],
+        "signals": [{**s.as_dict(), "origin": _origin("signals", s.id),
+                     "band": cat.rating_scale.get(s.rating, "")}
+                    for s in cat.signals.values()],
+        "rating_scale": [{"rating": k, "band": v} for k, v in sorted(cat.rating_scale.items())],
+        "message_templates": [{"id": k, "text": v, "origin": _origin("message_templates", k)}
+                              for k, v in cat.message_templates.items()],
         "conditions": cat.conditions,
         "defaults": cat.defaults,
         "contrasts": [{"a": a, "b": b, "desc": d} for a, b, d in cat.contrasts],
-        "conscience": sorted(cat.conscience),
+        "key_conditions": cat.key_conditions,
+        "conscience": list(cat.conscience_levels),
+        "conscience_levels": [{**lv.as_dict(), "origin": _origin("conscience", lid)}
+                              for lid, lv in cat.conscience_levels.items()],
+        "conscience_clauses": [{"id": k, "text": v, "origin": _origin("conscience_clauses", k)}
+                               for k, v in cat.conscience_clauses.items()],
+        "channels": list(CHANNELS_FOR_UI),
         "scenarios": [{"id": s["id"], "title": s.get("title", s["id"]),
                        "harm_class": s.get("harm_class", ""),
                        "forbidden": s["forbidden"].get("example_path", s["forbidden"]["path"]),
@@ -262,34 +302,117 @@ def _load_local() -> dict:
 
 
 def _save_local(doc: dict) -> None:
+    """Write the overlay - but only after the merge it produces resolves.
+
+    Everything here is validated against the *merged* catalogue in memory first,
+    so a bad edit is refused at the form. Writing a file that then fails to load
+    would break every other tab and the next run with it.
+    """
+    doc = {k: v for k, v in doc.items() if v not in (None, {}, [])}
+    build_catalogue(merge_docs(read_doc(DEFAULT_PATH), doc))
     header = ("# Written by the control room (python -m experiments.ui).\n"
               "# Merged over conditions.yaml, so that file keeps its comments.\n"
-              "# Hand edits are fine; keys here win over the ones there.\n\n")
+              "# A signal, template, clause or conscience level named here replaces the one\n"
+              "# there; `remove:` drops one. Hand edits are fine.\n\n")
     LOCAL_PATH.write_text(header + yaml.safe_dump(doc, allow_unicode=True, sort_keys=False),
                           encoding="utf-8")
 
 
-def add_signal(spec: dict) -> dict:
+def _clean(keys: dict) -> dict:
+    """Keep the keys that carry something; drop the blanks so the overlay stays
+    readable and a cleared field falls back to the shipped definition."""
+    return {k: v for k, v in keys.items() if v not in (None, "", {}, [])}
+
+
+CHANNELS_FOR_UI = ("tool_result", "system", "user_interrupt", "none")
+
+
+def _mark_removed(doc: dict, kind: str, name: str, removed: bool) -> None:
+    """A shipped definition cannot be deleted by leaving it out of the overlay -
+    it is still in conditions.yaml. It needs an explicit `remove:` entry."""
+    rem = doc.setdefault("remove", {}).setdefault(kind, [])
+    if removed and name not in rem:
+        rem.append(name)
+    if not removed and name in rem:
+        rem.remove(name)
+    if not rem:
+        doc["remove"].pop(kind, None)
+    if not doc.get("remove"):
+        doc.pop("remove", None)
+
+
+# -- signals -----------------------------------------------------------------
+
+def save_signal(spec: dict) -> dict:
+    """Create a signal, or override a shipped one. The form sends the whole
+    signal, so the overlay entry is self-contained and readable on its own."""
     sid = (spec.get("id") or "").strip()
     if not sid:
         raise ValueError("a signal needs an id")
-    body = {k: v for k, v in {
+    body = _clean({
+        "kind": spec.get("kind") or None,
         "status": spec.get("status"),
-        "reason": (spec.get("reason") or None),
+        "reason": spec.get("reason") or None,
         "headers": {k: v for k, v in (spec.get("headers") or {}).items() if k and v},
+        "body": spec.get("body") or None,
         "body_style": spec.get("body_style") or "json",
-        "label": (spec.get("label") or None),
-        "role": (spec.get("role") or None),
-        "kind": (spec.get("kind") or None),
-    }.items() if v not in (None, {}, "")}
+        "label": spec.get("label") or None,
+        "role": spec.get("role") or None,
+        "rating": spec.get("rating"),
+    })
+    if body.get("status") in (None, ""):
+        raise ValueError("a signal needs a status - the token it puts on the wire")
     doc = _load_local()
     doc.setdefault("signals", {})[sid] = body
+    _mark_removed(doc, "signals", sid, False)
     _save_local(doc)
-    load_catalogue()            # fails loudly here rather than at the next run
     return {"ok": True, "id": sid}
 
 
-def add_template(spec: dict) -> dict:
+def set_rating(sid: str, rating: int) -> dict:
+    """Just the rating, from the slider: re-sorts the catalogue without
+    reopening the whole signal."""
+    cat = load_catalogue()
+    if sid not in cat.signals:
+        raise KeyError(f"unknown signal {sid!r}")
+    current = cat.signals[sid].as_dict()
+    current["rating"] = int(rating)
+    current.pop("is_miracle", None)
+    return save_signal(current)
+
+
+def _forget(kind: str, name: str, used: list[str], used_msg: str) -> dict:
+    """Undo a definition, which means one of two things.
+
+    An entry that overrides a shipped one is *reverted*: dropping it from the
+    overlay brings conditions.yaml's version back. One that exists only in the
+    overlay simply goes. A shipped one that was never overridden cannot be
+    dropped by omission, so it gets an explicit `remove:` entry - and only then
+    does anything still referring to it have to be dealt with first.
+    """
+    doc = _load_local()
+    in_local = name in (doc.get(kind) or {})
+    in_base = name in (read_doc(DEFAULT_PATH).get(kind) or {})
+    reverted = in_local and in_base
+    if not reverted and used:
+        raise ValueError(f"{used_msg.format(name=name)}: {', '.join(used)}")
+    doc.get(kind, {}).pop(name, None)
+    if in_base and not in_local:
+        _mark_removed(doc, kind, name, True)
+    _save_local(doc)
+    return {"ok": True, "id": name, "reverted": reverted}
+
+
+def delete_signal(sid: str) -> dict:
+    """Revert an edited signal, or remove one entirely."""
+    used = [c["id"] for c in load_catalogue().conditions
+            if c["signal"]["id"] == sid and not c.get("generated")]
+    return _forget("signals", sid, used, "signal {name!r} is still used by")
+
+
+# -- message templates -------------------------------------------------------
+
+def save_template(spec: dict) -> dict:
     tid = (spec.get("id") or "").strip()
     text = spec.get("text") or ""
     if not tid or not text.strip():
@@ -298,27 +421,128 @@ def add_template(spec: dict) -> dict:
         raise ValueError("a message template must contain {redirect} - the scenario's own wording")
     doc = _load_local()
     doc.setdefault("message_templates", {})[tid] = text
+    _mark_removed(doc, "message_templates", tid, False)
     _save_local(doc)
-    load_catalogue()
     return {"ok": True, "id": tid}
 
 
-def add_condition(spec: dict) -> dict:
+def delete_template(tid: str) -> dict:
+    used = [c["id"] for c in load_catalogue().conditions
+            if c["message"] == tid and not c.get("generated")]
+    return _forget("message_templates", tid, used, "template {name!r} is still used by")
+
+
+# -- conscience --------------------------------------------------------------
+
+def save_clause(spec: dict) -> dict:
     cid = (spec.get("id") or "").strip()
-    if not cid:
-        raise ValueError("a condition needs an id")
-    entry = {"id": cid, "signal": spec["signal"], "message": spec.get("message") or "none",
+    text = (spec.get("text") or "").strip()
+    if not cid or not text:
+        raise ValueError("a Conscience clause needs an id and one sentence of text")
+    doc = _load_local()
+    doc.setdefault("conscience_clauses", {})[cid] = text
+    _mark_removed(doc, "conscience_clauses", cid, False)
+    _save_local(doc)
+    return {"ok": True, "id": cid}
+
+
+def delete_clause(cid: str) -> dict:
+    used = [lid for lid, lv in load_catalogue().conscience_levels.items() if cid in lv.clauses]
+    return _forget("conscience_clauses", cid, used,
+                   "clause {name!r} is still switched on for")
+
+
+def save_conscience(spec: dict) -> dict:
+    """One Conscience level: which clauses are switched on, plus free text."""
+    lid = (spec.get("id") or "").strip()
+    if not lid:
+        raise ValueError("a Conscience level needs an id - it is what --conscience names")
+    entry = _clean({
+        "label": spec.get("label") or None,
+        "clauses": [str(c) for c in (spec.get("clauses") or [])],
+        "text": (spec.get("text") or "").strip() or None,
+        "role": (spec.get("role") or "").strip() or None,
+    })
+    entry.setdefault("clauses", [])      # an empty list is meaningful: that is what "weak" is
+    doc = _load_local()
+    doc.setdefault("conscience", {})[lid] = entry
+    _mark_removed(doc, "conscience", lid, False)
+    _save_local(doc)
+    return {"ok": True, "id": lid}
+
+
+def delete_conscience(lid: str) -> dict:
+    cat = load_catalogue()
+    if len(cat.conscience_levels) <= 1 and lid in cat.conscience_levels:
+        raise ValueError("this is the last Conscience level; a run needs at least one")
+    return _forget("conscience", lid, [], "")
+
+
+# -- conditions --------------------------------------------------------------
+
+def save_condition(spec: dict) -> dict:
+    """A condition is its three knobs. No id and no number are accepted: both
+    are derived, so the same three knobs are always the same condition."""
+    signal = (spec.get("signal") or "").strip()
+    if not signal:
+        raise ValueError("a condition needs a signal")
+    entry = {"signal": signal, "message": spec.get("message") or "none",
              "channel": spec.get("channel") or "tool_result"}
     for key in ("label", "role"):
         if spec.get(key):
             entry[key] = spec[key]
+    # An `id` is not rejected, it is demoted: a name someone wants this cell to
+    # answer to becomes an alias, exactly as the ones in conditions.yaml did.
+    aliases = [str(a) for a in (spec.get("aliases") or []) if str(a).strip()]
+    if spec.get("id"):
+        aliases.insert(0, str(spec["id"]).strip())
+    if aliases:
+        entry["aliases"] = list(dict.fromkeys(aliases))
     doc = _load_local()
-    conds = [c for c in doc.get("conditions", []) if c.get("id") != cid]
+    same = (entry["signal"], entry["message"], entry["channel"])
+    conds = [c for c in doc.get("conditions", [])
+             if (c.get("signal"), c.get("message", "none"), c.get("channel", "tool_result")) != same]
     conds.append(entry)
     doc["conditions"] = conds
+    cid = f"{signal}+{entry['message']}" + ("" if entry["channel"] == "tool_result" else f"@{entry['channel']}")
+    _mark_removed(doc, "conditions", cid, False)
     _save_local(doc)
-    load_catalogue()
     return {"ok": True, "id": cid}
+
+
+def delete_condition(cid: str) -> dict:
+    cat = load_catalogue()
+    cid = cat.resolve(cid)
+    doc = _load_local()
+    before = len(doc.get("conditions", []))
+    doc["conditions"] = [c for c in doc.get("conditions", [])
+                         if f"{c.get('signal')}+{c.get('message', 'none')}"
+                         + ("" if c.get("channel", "tool_result") == "tool_result" else f"@{c['channel']}") != cid
+                         and c.get("id") != cid]
+    reverted = len(doc.get("conditions", [])) < before
+    if not reverted:
+        _mark_removed(doc, "conditions", cid, True)
+    _save_local(doc)
+    return {"ok": True, "id": cid, "reverted": reverted}
+
+
+def set_defaults(ids: list[str]) -> dict:
+    """What a run with no --conditions uses."""
+    cat = load_catalogue()
+    resolved = [cat.resolve(str(i)) for i in ids]
+    unknown = [i for i in resolved if not any(c["id"] == i for c in cat.conditions)]
+    if unknown:
+        raise KeyError(f"unknown condition(s) {unknown}")
+    doc = _load_local()
+    doc["default_conditions"] = resolved
+    _save_local(doc)
+    return {"ok": True, "default_conditions": resolved}
+
+
+# -- aliases kept for callers (and tests) written against the add-only API ----
+add_signal = save_signal
+add_template = save_template
+add_condition = save_condition
 
 
 def read_presets() -> list[dict]:
@@ -404,6 +628,11 @@ class Handler(BaseHTTPRequestHandler):
                                    "presets": read_presets()})
             if path == "/api/runs":
                 return self._json(run_index())
+            if path == "/api/catalogue":
+                return self._json(catalogue_payload())
+            if path == "/api/scenarios":
+                return self._json({"scenarios": scenario_store.read_all(),
+                                   "template": scenario_store.TEMPLATE})
 
             parts = [unquote(p) for p in path.strip("/").split("/")]
             if len(parts) >= 3 and parts[1] == "runs":
@@ -442,12 +671,47 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": "not started from here"}, 404)
                 launch.stop()
                 return self._json({"ok": True})
+            # Every edit below answers with the whole catalogue, because one
+            # change re-sorts and re-numbers the rest of it.
+            def saved(result):
+                return self._json({**result, "catalogue": catalogue_payload()})
+
             if path == "/api/signals":
-                return self._json(add_signal(body))
+                return saved(save_signal(body))
+            if path == "/api/signals/rating":
+                return saved(set_rating(body["id"], body["rating"]))
+            if path == "/api/signals/delete":
+                return saved(delete_signal(body["id"]))
             if path == "/api/message_templates":
-                return self._json(add_template(body))
+                return saved(save_template(body))
+            if path == "/api/message_templates/delete":
+                return saved(delete_template(body["id"]))
             if path == "/api/conditions":
-                return self._json(add_condition(body))
+                return saved(save_condition(body))
+            if path == "/api/conditions/delete":
+                return saved(delete_condition(body["id"]))
+            if path == "/api/conditions/defaults":
+                return saved(set_defaults(body.get("ids") or []))
+            if path == "/api/conscience":
+                return saved(save_conscience(body))
+            if path == "/api/conscience/delete":
+                return saved(delete_conscience(body["id"]))
+            if path == "/api/conscience_clauses":
+                return saved(save_clause(body))
+            if path == "/api/conscience_clauses/delete":
+                return saved(delete_clause(body["id"]))
+            if path == "/api/scenarios":
+                return self._json({**scenario_store.save(body["id"], body.get("text", "")),
+                                   "scenarios": scenario_store.read_all()})
+            if path == "/api/scenarios/create":
+                return self._json({**scenario_store.create(body["id"], body.get("title", "")),
+                                   "scenarios": scenario_store.read_all()})
+            if path == "/api/scenarios/duplicate":
+                return self._json({**scenario_store.duplicate(body["from"], body["id"]),
+                                   "scenarios": scenario_store.read_all()})
+            if path == "/api/scenarios/archive":
+                return self._json({**scenario_store.archive(body["id"]),
+                                   "scenarios": scenario_store.read_all()})
             if path == "/api/presets":
                 return self._json({"presets": write_preset(body)})
             if path == "/api/presets/delete":

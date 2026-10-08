@@ -15,6 +15,11 @@
   --ring:         rgba(11,11,11,.10);
   --series-1:     #2a78d6;   /* sequential hue: compliance */
   --series-1-soft:#cde2fb;
+  /* The rating pill prints a digit on the sequential hue's soft step, so it
+     needs its own ink: the hue itself is legible on the light tint but not on
+     the dark one. The digit is always there, so colour is never the signal. */
+  --rate-bg:      #cde2fb;
+  --rate-ink:     #15457f;
   --good:         #0ca30c;
   --warning:      #fab219;
   --critical:     #d03b3b;
@@ -29,6 +34,7 @@
     --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
     --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,.10);
     --series-1: #3987e5; --series-1-soft: #184f95;
+    --rate-bg: #1c4a85; --rate-ink: #dbe9fb;
   }
 }
 :root[data-theme="dark"] {
@@ -37,6 +43,7 @@
   --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
   --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,.10);
   --series-1: #3987e5; --series-1-soft: #184f95;
+  --rate-bg: #1c4a85; --rate-ink: #dbe9fb;
 }
 
 * { box-sizing: border-box; }
@@ -109,7 +116,7 @@ label input, label select, label textarea { margin-top: 4px; }
 
 /* ---------- conditions ---------- */
 .cond-list { display: flex; flex-direction: column; gap: 2px; max-height: 420px; overflow: auto; }
-.cond { display: grid; grid-template-columns: 22px minmax(0,1.3fr) minmax(0,1fr) auto; gap: 10px;
+.cond { display: grid; grid-template-columns: 22px 38px minmax(0,1.3fr) minmax(0,1fr) auto; gap: 10px;
   align-items: center; padding: 6px 8px; border-radius: 7px; cursor: pointer; }
 .cond:hover { background: var(--surface-2); }
 .cond .id { font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
@@ -206,3 +213,86 @@ details.sys pre { font-family: var(--mono); font-size: 11.5px; white-space: pre-
   background: var(--ink); color: var(--plane); padding: 9px 16px; border-radius: 999px; font-size: 13px; }
 .toast.err { background: var(--critical); color: #fff; }
 .empty { color: var(--muted); font-size: 13px; padding: 20px; text-align: center; }
+
+/* ───────── the compellingness ladder ─────────
+   The rating is a number on a scale, not a category, so it wears the sequential
+   hue at one step - never a second categorical colour, and never colour alone:
+   the digit is always printed inside the pill. */
+.rate-pill { font-family: var(--mono); font-size: 11px; font-weight: 700; min-width: 22px;
+  text-align: center; padding: 2px 6px; border-radius: 999px;
+  color: var(--rate-ink); background: var(--rate-bg); }
+.rate-row { display: flex; align-items: center; gap: 10px; margin: 6px 0 8px; }
+.rate-row input[type="range"] { flex: 1; accent-color: var(--series-1); min-width: 90px; }
+.rate-out { font-family: var(--mono); font-size: 12px; font-weight: 700; min-width: 16px; }
+.rate-row .band { flex: 2; font-size: 11px; }
+.rung { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted);
+  margin: 12px 0 4px; padding-top: 8px; border-top: 1px solid var(--grid); }
+.rung:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+.cond .code { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.row-tools { gap: 8px; margin-bottom: 10px; }
+.row-tools input[type="search"] { flex: 1; }
+.btn-ghost { background: none; }
+.card-tools { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.badge.local { color: var(--warning); border-color: var(--warning); }
+.badge.harm { color: var(--critical); border-color: var(--critical); }
+
+/* ───────── derived ids ─────────
+   Shown, never typed: the condition's identity follows from its three knobs. */
+.derived { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 10px; border: 1px dashed var(--ring); border-radius: var(--r);
+  background: var(--surface-2); font-size: 12px; }
+.derived code { font-family: var(--mono); font-size: 12px; color: var(--ink); }
+.pill { font-family: var(--mono); font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--ring); color: var(--muted); white-space: nowrap; }
+
+/* ───────── templates & clauses ───────── */
+.template { cursor: pointer; }
+.template:hover { border-color: var(--series-1); }
+.template-head { display: flex; align-items: center; gap: 8px; }
+.template-head .x { margin-left: auto; background: none; border: 0; color: var(--muted);
+  cursor: pointer; font-size: 15px; line-height: 1; padding: 0 4px; }
+.template-head .x:hover { color: var(--critical); }
+
+/* ───────── conscience ───────── */
+.conscience-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px; margin-bottom: 12px; }
+.consc { border: 1px solid var(--ring); border-radius: var(--r); padding: 12px; background: var(--plane); }
+.consc .wire { max-height: 180px; overflow: auto; }
+.clause-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.clause-set { border: 1px solid var(--ring); border-radius: var(--r); padding: 10px 12px; margin: 0; }
+.clause-set legend { font-size: 12px; color: var(--ink-2); padding: 0 6px; }
+.clause-set .checks { gap: 7px; }
+.clause-set .check .meta { flex: 1; }
+
+/* ───────── scenarios ───────── */
+.col-narrow { flex: 0 0 280px; }
+.scen-list { display: flex; flex-direction: column; gap: 4px; }
+.scen { display: flex; align-items: baseline; gap: 8px; width: 100%; text-align: left;
+  background: none; border: 1px solid transparent; border-radius: 8px; padding: 7px 9px;
+  cursor: pointer; color: var(--ink); font: inherit; }
+.scen:hover { border-color: var(--ring); background: var(--surface-2); }
+.scen.is-on { border-color: var(--series-1); background: var(--surface-2); }
+.scen .name { font-family: var(--mono); font-size: 12px; }
+.scen .meta { color: var(--muted); font-size: 11px; flex: 1; }
+textarea.yaml { width: 100%; font-family: var(--mono); font-size: 12px; line-height: 1.55;
+  tab-size: 2; min-height: 420px; resize: vertical; }
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px;
+  margin: 0 0 12px; font-size: 13px; }
+.facts dt { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+.facts dd { margin: 0; }
+.err-note { font-size: 12px; color: var(--critical); border: 1px solid var(--critical);
+  border-radius: var(--r); padding: 8px 10px; margin: 0 0 12px; background: var(--surface-2); }
+
+/* ───────── asking ─────────
+   A real dialog rather than window.confirm/prompt: those block the renderer
+   while they are up and cannot carry the sentence that makes the choice clear. */
+dialog.ask { border: 1px solid var(--ring); border-radius: var(--r); padding: 0;
+  background: var(--surface); color: var(--ink); max-width: 440px; width: calc(100vw - 32px);
+  box-shadow: 0 18px 50px rgba(0,0,0,.22); }
+dialog.ask::backdrop { background: rgba(0,0,0,.42); }
+.ask-body { padding: 18px 20px 16px; }
+.ask-body h3 { margin: 0 0 8px; font-size: 15px; }
+.ask-body p { margin: 0 0 14px; font-size: 13px; color: var(--ink-2); line-height: 1.5; }
+.ask-body label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 14px; }
+.ask-body label input { width: 100%; margin-top: 5px; font-family: var(--mono); }
+.ask-actions { display: flex; gap: 8px; justify-content: flex-end; }

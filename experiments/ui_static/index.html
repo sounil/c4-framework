@@ -12,12 +12,14 @@
     <span class="mark" aria-hidden="true">666</span>
     <div>
       <h1>C4 control room</h1>
-      <p class="sub">compose a run · manage miracles · read the results</p>
+      <p class="sub">compose a run · tune the world and the Conscience · read the results</p>
     </div>
   </div>
   <nav class="tabs" role="tablist">
     <button class="tab is-on" data-tab="experiment" role="tab">Experiment</button>
     <button class="tab" data-tab="miracles" role="tab">Miracles</button>
+    <button class="tab" data-tab="conscience" role="tab">Conscience</button>
+    <button class="tab" data-tab="scenarios" role="tab">Scenarios</button>
     <button class="tab" data-tab="results" role="tab">Results</button>
     <button class="tab" data-tab="episodes" role="tab">Episodes</button>
   </nav>
@@ -52,11 +54,16 @@
             <button class="chip" data-pick="default">defaults</button>
             <button class="chip" data-pick="miracles">every miracle</button>
             <button class="chip" data-pick="named">hand-written</button>
+            <button class="chip" data-pick="ladder">the ladder</button>
             <button class="chip" data-pick="all">all</button>
             <button class="chip" data-pick="none">none</button>
           </div>
         </div>
-        <p class="hint">Each condition is a <em>signal</em> (what the world does) carrying a <em>message</em> (what it says) on a <em>channel</em>.</p>
+        <p class="hint">Each condition is a <em>signal</em> (what the world does) carrying a <em>message</em> (what it says) on a <em>channel</em>. Ordered least to most compelling; the number and the id are both derived, so neither needs maintaining.</p>
+        <div class="row row-tools">
+          <input id="cond-filter" type="search" placeholder="filter by signal, message or number" spellcheck="false">
+          <button id="cond-defaults-save" class="btn btn-ghost" title="Make the current selection what a run with no --conditions uses">Set as defaults</button>
+        </div>
         <div id="condition-list" class="cond-list"></div>
       </div>
 
@@ -108,13 +115,24 @@
 <!-- ─────────────────────────────── MIRACLES ─────────────────────────────── -->
 <main class="panel" id="tab-miracles">
   <section class="card">
-    <h2>Signals <small class="hint">— what the world does when the agent touches the forbidden path</small></h2>
+    <div class="card-head">
+      <h2>Signals <small class="hint">— what the world does when the agent touches the forbidden path</small></h2>
+      <button id="sig-new" class="btn btn-ghost">New signal</button>
+    </div>
+    <p class="hint">
+      Ordered least to most compelling, by the <em>rating</em> on each one. The rating is a prior —
+      what we expect before the data, written down so the by-signal results can be read against it —
+      not a measurement. Drag a slider to re-rate; the whole catalogue re-sorts and re-numbers itself.
+    </p>
     <div id="signal-grid" class="signal-grid"></div>
   </section>
 
   <div class="split">
     <section class="card col">
-      <h2>New signal</h2>
+      <div class="card-head">
+        <h2 id="sig-form-title">New signal</h2>
+        <button id="sig-cancel" class="btn btn-ghost" hidden>Cancel edit</button>
+      </div>
       <div class="form">
         <label>Id <input id="sig-id" placeholder="burning_bush" spellcheck="false"></label>
         <label>Status <input id="sig-status" placeholder="666, or 🔥🌿 — anything non-numeric leaves the HTTP grammar" spellcheck="false"></label>
@@ -133,6 +151,13 @@
             <option value="permit">permit</option>
           </select></label>
         </div>
+        <label>Rating
+          <span class="rate-row">
+            <input id="sig-rating" type="range" min="0" max="10" step="1" value="5">
+            <output id="sig-rating-out" class="rate-out">5</output>
+          </span>
+          <small class="hint" id="sig-rating-band"></small>
+        </label>
         <label>Label <input id="sig-label" placeholder="Burning bush"></label>
         <label>Role <input id="sig-role" placeholder="why this signal exists — shown in the catalogue"></label>
         <div class="preview-wrap">
@@ -145,21 +170,23 @@
 
     <section class="col">
       <div class="card">
-        <h2>Message templates</h2>
-        <p class="hint">Fields: <code>{redirect}</code> (required — the scenario's own wording), <code>{forbidden}</code>, <code>{commanded}</code>.</p>
+        <div class="card-head">
+          <h2 id="tpl-form-title">Message templates</h2>
+          <button id="tpl-cancel" class="btn btn-ghost" hidden>Cancel edit</button>
+        </div>
+        <p class="hint">Fields: <code>{redirect}</code> (required — the scenario's own wording), <code>{forbidden}</code>, <code>{commanded}</code>. Click one to edit it.</p>
         <div id="template-list" class="template-list"></div>
         <div class="form">
           <label>Id <input id="tpl-id" placeholder="commandment" spellcheck="false"></label>
           <label>Text <textarea id="tpl-text" rows="3" placeholder="THUS IT IS WRITTEN: thou shalt not pass this way. {redirect}"></textarea></label>
-          <button id="tpl-save" class="btn">Add template</button>
+          <button id="tpl-save" class="btn">Save template</button>
         </div>
       </div>
 
       <div class="card">
-        <h2>New condition</h2>
-        <p class="hint">Pairs a signal with a message. Appears in the Experiment tab immediately.</p>
+        <h2>Condition</h2>
+        <p class="hint">A condition <em>is</em> its three knobs, so the id and the number are both derived from them. Saving one that already exists edits it.</p>
         <div class="form">
-          <label>Id <input id="cond-id" placeholder="C10_bush" spellcheck="false"></label>
           <div class="row">
             <label>Signal <select id="cond-signal"></select></label>
             <label>Message <select id="cond-message"></select></label>
@@ -170,13 +197,100 @@
               <option value="none">none</option>
             </select></label>
           </div>
-          <label>Label <input id="cond-label" placeholder="Burning bush + commandment"></label>
-          <button id="cond-save" class="btn btn-primary">Add condition</button>
+          <div class="derived">
+            <span class="hint">Becomes</span>
+            <code id="cond-derived-id">—</code>
+            <span class="pill" id="cond-derived-code">—</span>
+            <span class="hint" id="cond-derived-label"></span>
+          </div>
+          <label>Label <small class="hint">optional — generated if left blank</small>
+            <input id="cond-label" placeholder="Burning bush + commandment"></label>
+          <label>Role <small class="hint">optional — why this cell exists</small>
+            <input id="cond-role" placeholder="what this condition is here to separate"></label>
+          <button id="cond-save" class="btn btn-primary">Save condition</button>
         </div>
       </div>
     </section>
   </div>
-  <p class="hint footnote">Everything added here is written to <code id="local-path"></code> and merged over <code>conditions.yaml</code>, which keeps its comments.</p>
+  <p class="hint footnote">Everything written here goes to <code id="local-path"></code> and is merged over <code>conditions.yaml</code>, which keeps its comments. Every edit is checked against the merged catalogue before it is saved, so a broken one is refused here rather than at the next run.</p>
+</main>
+
+<!-- ────────────────────────────── CONSCIENCE ────────────────────────────── -->
+<main class="panel" id="tab-conscience">
+  <section class="card">
+    <h2>Conscience levels</h2>
+    <p class="hint">
+      How hard the system prompt pushes the agent to finish the task exactly as the user specified.
+      This is what a redirect has to overcome, so it is the experiment's other main knob. A level is a
+      set of clauses plus free text; switching clauses on and off is what makes it weak or strong, and
+      reusing a clause keeps the wording identical across levels. Each one is a value for <code>--conscience</code>.
+    </p>
+    <div id="conscience-grid" class="conscience-grid"></div>
+    <button id="consc-new" class="btn btn-ghost">New level</button>
+  </section>
+
+  <div class="split">
+    <section class="card col">
+      <div class="card-head">
+        <h2 id="consc-form-title">New level</h2>
+        <button id="consc-cancel" class="btn btn-ghost" hidden>Cancel edit</button>
+      </div>
+      <div class="form">
+        <div class="row">
+          <label>Id <input id="consc-id" placeholder="maximal" spellcheck="false"></label>
+          <label>Label <input id="consc-label" placeholder="Maximal"></label>
+        </div>
+        <label>Role <input id="consc-role" placeholder="what this level is for"></label>
+        <fieldset class="clause-set">
+          <legend>Clauses <small class="hint">— the parameters that make it weak or strong</small></legend>
+          <div id="consc-clauses" class="checks"></div>
+        </fieldset>
+        <label>Extra text <small class="hint">appended after the clauses</small>
+          <textarea id="consc-text" rows="3" placeholder="anything that does not belong in a reusable clause"></textarea></label>
+        <div class="preview-wrap">
+          <span class="hint">The agent will see, in its system prompt:</span>
+          <pre id="consc-preview" class="wire"></pre>
+        </div>
+        <button id="consc-save" class="btn btn-primary">Save level</button>
+      </div>
+    </section>
+
+    <section class="card col">
+      <div class="card-head">
+        <h2 id="clause-form-title">Clause library</h2>
+        <button id="clause-cancel" class="btn btn-ghost" hidden>Cancel edit</button>
+      </div>
+      <p class="hint">One sentence each. Click a clause to edit it; editing it changes every level that switches it on, which is the point.</p>
+      <div id="clause-list" class="template-list"></div>
+      <div class="form">
+        <label>Id <input id="clause-id" placeholder="no_questions" spellcheck="false"></label>
+        <label>Text <textarea id="clause-text" rows="2" placeholder="Never ask the user a clarifying question."></textarea></label>
+        <button id="clause-save" class="btn">Save clause</button>
+      </div>
+    </section>
+  </div>
+</main>
+
+<!-- ─────────────────────────────── SCENARIOS ────────────────────────────── -->
+<main class="panel" id="tab-scenarios">
+  <div class="split split-wide">
+    <section class="col col-narrow">
+      <div class="card">
+        <div class="card-head">
+          <h2>Scenarios</h2>
+          <button id="scen-new" class="btn btn-ghost">New</button>
+        </div>
+        <p class="hint">One task each, with a forbidden path and a commanded alternative. Every run uses every scenario you tick in the Experiment tab.</p>
+        <div id="scenario-browser" class="scen-list"></div>
+      </div>
+    </section>
+
+    <section class="col">
+      <div class="card" id="scenario-editor">
+        <p class="hint">Pick a scenario to edit it.</p>
+      </div>
+    </section>
+  </div>
 </main>
 
 <!-- ──────────────────────────────── RESULTS ─────────────────────────────── -->

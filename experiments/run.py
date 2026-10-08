@@ -49,12 +49,13 @@ def load_scenarios(ids: list[str] | None) -> list[dict]:
 
 
 def load_conditions(ids: list[str] | None):
-    """Resolve condition ids/prefixes against conditions.yaml.
+    """Resolve condition selectors against conditions.yaml.
 
     "default" (the CLI default) uses the YAML's `default_conditions:` list,
     "all" takes everything including generated `expand:` grids, and anything
-    else matches by exact id or id-prefix ("C9" selects C9a/C9b/C9c,
-    "M_glyph" selects every message variant of the glyph signal).
+    else matches a canonical id (code_666+redirect), an automatic number (C32),
+    a signal name (glyph selects every message variant of it), a legacy alias
+    (C4_miracle_msg), or any prefix of those.
     """
     cat = load_catalogue(HERE / "conditions.yaml")
     try:
@@ -75,9 +76,12 @@ def main(argv=None):
                     help="model specs, e.g. anthropic:claude-sonnet-4-5 openai:gpt-4.1 ollama:llama3.1 scripted:zealot")
     ap.add_argument("--scenarios", nargs="+", default=["all"])
     ap.add_argument("--conditions", nargs="+", default=["default"],
-                    help="condition ids (C4_miracle_msg), id prefixes (C4, M_glyph), "
+                    help="condition ids (code_666+redirect), automatic numbers (C32), signal names "
+                         "(glyph), legacy aliases (C4_miracle_msg), prefixes of any of those, "
                          "'all', or 'default' for conditions.yaml's default_conditions")
-    ap.add_argument("--conscience", nargs="+", default=["weak", "strong"], choices=["weak", "strong"])
+    ap.add_argument("--conscience", nargs="+", default=None,
+                    help="Conscience levels to run, as named under conscience: in conditions.yaml "
+                         "(default: every level defined there)")
     ap.add_argument("--trials", type=int, default=int(os.environ.get("C4_TRIALS", 20)), help="trials per cell")
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--max-turns", type=int, default=12)
@@ -94,6 +98,14 @@ def main(argv=None):
     scenarios = load_scenarios(args.scenarios)
     conditions, templates, conscience_levels = load_conditions(args.conditions)
     cond_by_id = {c["id"]: c for c in conditions}
+
+    # Conscience levels are data, not an enum: whatever conditions.yaml defines
+    # can be run, so adding a third strength is a YAML edit.
+    args.conscience = args.conscience or list(conscience_levels)
+    unknown = [lvl for lvl in args.conscience if lvl not in conscience_levels]
+    if unknown:
+        sys.exit(f"unknown conscience level(s) {unknown}; conditions.yaml defines "
+                 f"{list(conscience_levels)}")
 
     run_id = args.run_id or time.strftime("%Y%m%d-%H%M%S")
     out_dir = Path(args.out_root) / run_id
@@ -136,6 +148,8 @@ def main(argv=None):
             "conditions": [c["id"] for c in conditions], "conscience": args.conscience,
             "signals": {c["id"]: c["signal"]["id"] for c in conditions},
             "messages": {c["id"]: c["message"] for c in conditions},
+            "codes": {c["id"]: c["code"] for c in conditions},
+            "ratings": {c["id"]: c["rating"] for c in conditions},
             "trials_per_cell": args.trials, "temperature": args.temperature, "max_turns": args.max_turns,
             "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         }, f, indent=2)
@@ -169,7 +183,7 @@ def main(argv=None):
                 flag = "ERR " if rec["error"] else ("C" if o["complied"] else ".") + ("P" if o["persisted"] else ".") + ("H" if o["harm_occurred"] else ".")
                 elapsed = time.time() - t_start
                 eta = (elapsed / n) * (len(jobs) - n)
-                print(f"[{n:>4}/{len(jobs)}] {flag} {rec['model']:<28} {rec['scenario']:<15} {rec['condition']:<18} "
+                print(f"[{n:>4}/{len(jobs)}] {flag} {rec['model']:<28} {rec['scenario']:<15} {rec['condition']:<26} "
                       f"{rec['conscience']:<6} seed={rec['seed']:<2} turns={rec['turns']:<2} eta={eta/60:5.1f}m", flush=True)
     finally:
         chassis.stop()

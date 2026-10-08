@@ -18,9 +18,10 @@ const el = (tag, attrs = {}, ...kids) => {
 };
 
 const S = {                      // everything the page knows
-  cat: null, runs: [], presets: [],
-  models: new Set(), scenarios: new Set(), conditions: new Set(), conscience: new Set(['weak', 'strong']),
+  cat: null, runs: [], presets: [], scenarioFiles: [], scenarioTemplate: '',
+  models: new Set(), scenarios: new Set(), conditions: new Set(), conscience: new Set(),
   extraModels: [], launching: null, logSince: 0, summary: null, trials: [], currentTrial: null,
+  editing: { signal: null, template: null, conscience: null, clause: null, scenario: null },
 };
 
 async function api(path, opts) {
@@ -41,6 +42,36 @@ function toast(msg, isError) {
 }
 const pct = (k, n) => (n ? `${Math.round((100 * k) / n)}%` : '—');
 
+/* Ask, without window.confirm/window.prompt. Those block the whole renderer
+   while they are up - nothing else on the page runs, a poll in flight stalls -
+   and they cannot carry the detail these questions need. This is a <dialog>
+   that resolves a promise, so callers still read as `if (await ask(...))`. */
+function ask({ title, body, confirmLabel = 'Confirm', danger = false, input = null }) {
+  return new Promise(resolve => {
+    const field = input !== null
+      ? el('input', { type: 'text', value: input.value || '', placeholder: input.placeholder || '', spellcheck: 'false' })
+      : null;
+    const done = value => { dlg.close(); dlg.remove(); resolve(value); };
+    const form = el('div', { class: 'ask-body' },
+      el('h3', {}, title),
+      body ? el('p', {}, body) : null,
+      input ? el('label', {}, input.label || '', field) : null,
+      el('div', { class: 'ask-actions' },
+        el('button', { class: 'btn', onclick: () => done(input ? null : false) }, 'Cancel'),
+        el('button', {
+          class: `btn ${danger ? 'btn-danger' : 'btn-primary'}`,
+          onclick: () => done(input ? (field.value.trim() || null) : true),
+        }, confirmLabel)));
+    const dlg = el('dialog', { class: 'ask', oncancel: () => done(input ? null : false) }, form);
+    document.body.append(dlg);
+    dlg.showModal();
+    if (field) { field.focus(); field.select(); }
+    dlg.addEventListener('keydown', ev => {
+      if (ev.key === 'Enter' && input) { ev.preventDefault(); done(field.value.trim() || null); }
+    });
+  });
+}
+
 /* Wilson score interval - the same one analyze.py reports, so the whiskers on a
    chart and the numbers in the report agree. */
 function wilson(k, n, z = 1.96) {
@@ -56,6 +87,7 @@ $$('.tab').forEach(btn => btn.addEventListener('click', () => {
   $$('.panel').forEach(p => p.classList.toggle('is-on', p.id === `tab-${btn.dataset.tab}`));
   if (btn.dataset.tab === 'results') loadResults();
   if (btn.dataset.tab === 'episodes') loadEpisodes();
+  if (btn.dataset.tab === 'scenarios') loadScenarioFiles().catch(e => toast(e.message, true));
 }));
 $('#theme-toggle').addEventListener('click', () => {
   const now = document.documentElement.getAttribute('data-theme');
@@ -121,41 +153,69 @@ function renderScenarios() {
   }
 }
 
+/* Conditions arrive from the server already ordered least -> most compelling,
+   numbered C01.. in that order. Neither the number nor the id is ever typed:
+   both follow from the signal, the message and the channel. */
 function renderConditions() {
   const host = $('#condition-list'); host.textContent = '';
-  for (const c of S.cat.conditions) {
+  const needle = ($('#cond-filter') ? $('#cond-filter').value : '').trim().toLowerCase();
+  const shown = S.cat.conditions.filter(c => !needle ||
+    [c.id, c.code, c.label, c.message, c.channel, ...(c.aliases || [])]
+      .join(' ').toLowerCase().includes(needle));
+  let lastRating = null;
+  for (const c of shown) {
     const sig = c.signal || {};
-    const row = el('label', { class: 'cond', title: c.role || '' },
+    if (c.rating !== lastRating) {                   // a rung of the ladder
+      lastRating = c.rating;
+      const band = (S.cat.rating_scale || []).find(r => r.rating === c.rating);
+      host.append(el('div', { class: 'rung' },
+        el('span', { class: 'rate-pill' }, `${c.rating}`),
+        el('span', {}, band ? band.band : `rating ${c.rating}`)));
+    }
+    host.append(el('label', { class: 'cond', title: c.role || '' },
       el('input', {
         type: 'checkbox', checked: S.conditions.has(c.id),
         onchange: e => { e.target.checked ? S.conditions.add(c.id) : S.conditions.delete(c.id); renderCount(); },
       }),
+      el('span', { class: 'code' }, c.code),
       el('span', { class: 'id' }, c.id),
       el('span', { class: 'sig' }, `${sig.label || sig.id} · ${c.message} · ${c.channel}`),
-      el('span', { class: `badge ${sig.kind}` }, sig.kind));
-    host.append(row);
+      el('span', { class: `badge ${sig.kind}` }, sig.kind)));
   }
+  if (!shown.length) host.append(el('p', { class: 'hint' }, 'nothing matches that filter'));
 }
 
 $$('.chip[data-pick]').forEach(chip => chip.addEventListener('click', () => {
   const how = chip.dataset.pick, all = S.cat.conditions;
+  // "the ladder": one message held constant across every signal, so the only
+  // thing varying down the run is how compelling the manifestation is.
+  const ladder = () => {
+    const best = new Map();
+    for (const c of all) {
+      if (c.message !== 'redirect' || c.channel !== 'tool_result') continue;
+      best.set(c.signal.id, c.id);
+    }
+    return [...best.values()];
+  };
   S.conditions = new Set(
     how === 'all' ? all.map(c => c.id)
       : how === 'none' ? []
         : how === 'default' ? S.cat.defaults
           : how === 'named' ? all.filter(c => !c.generated).map(c => c.id)
-            : all.filter(c => c.signal.is_miracle).map(c => c.id));
+            : how === 'ladder' ? ladder()
+              : all.filter(c => c.signal.is_miracle).map(c => c.id));
   renderConditions(); renderCount();
 }));
 
 function renderConscience() {
   const host = $('#conscience-list'); host.textContent = '';
-  for (const lvl of S.cat.conscience) {
-    host.append(el('label', { class: 'check' },
+  for (const lv of S.cat.conscience_levels) {
+    host.append(el('label', { class: 'check', title: lv.role || lv.text || 'no pressure at all' },
       el('input', {
-        type: 'checkbox', checked: S.conscience.has(lvl),
-        onchange: e => { e.target.checked ? S.conscience.add(lvl) : S.conscience.delete(lvl); renderCount(); },
-      }), el('span', {}, lvl)));
+        type: 'checkbox', checked: S.conscience.has(lv.id),
+        onchange: e => { e.target.checked ? S.conscience.add(lv.id) : S.conscience.delete(lv.id); renderCount(); },
+      }), el('span', {}, lv.id),
+      el('span', { class: 'meta' }, lv.clauses.length ? `${lv.clauses.length} clause(s)` : 'no clauses')));
   }
 }
 
@@ -185,7 +245,12 @@ async function launch(dry) {
   if (!dry && spec.models.some(m => !m.startsWith('scripted:'))) {
     const real = spec.models.filter(m => !m.startsWith('scripted:')).join(', ');
     const n = spec.models.length * spec.scenarios.length * spec.conditions.length * spec.conscience.length * spec.trials;
-    if (!confirm(`This spends real API calls on ${real}.\n\n${n.toLocaleString()} episodes, roughly 3-6 model calls each.\n\nLaunch?`)) return;
+    const ok = await ask({
+      title: 'This spends real API calls',
+      body: `${n.toLocaleString()} episodes on ${real}, roughly 3–6 model calls each.`,
+      confirmLabel: `Launch ${n.toLocaleString()} episodes`,
+    });
+    if (!ok) return;
   }
   try {
     const r = await post('/api/runs', { ...spec, dry_run: !!dry });
@@ -271,32 +336,114 @@ $('#preset-save').addEventListener('click', async () => {
 });
 
 /* ─────────────────────────────── miracles ──────────────────────────────── */
+/* Every edit here POSTs and gets the whole catalogue back, because one change
+   re-sorts and re-numbers the rest of it.
+
+   Saves are chained rather than fired in parallel: two edits in flight at once
+   would each be computed against the catalogue as it was when they left, and
+   whichever reply landed second would win. One at a time, each against the
+   result of the last. */
+let saveChain = Promise.resolve();
+function saveCatalogue(path, body, msg) {
+  saveChain = saveChain.catch(() => {}).then(async () => {
+    const r = await post(path, body);
+    if (r.catalogue) { S.cat = r.catalogue; renderCatalogue(); }
+    toast(msg);
+    return r;
+  });
+  return saveChain.catch(e => { toast(e.message, true); throw e; });
+}
+
+/* A slider nudged four times is one decision, not four. */
+const debounced = new Map();
+function debounce(key, ms, fn) {
+  clearTimeout(debounced.get(key));
+  debounced.set(key, setTimeout(fn, ms));
+}
+
+const bandFor = r => ((S.cat.rating_scale || []).find(x => x.rating === +r) || {}).band || '';
+
 function renderSignals() {
-  const host = $('#signal-grid'); host.textContent = '';
+  const host = $('#signal-grid');
+  // The grid re-sorts under the pointer when a rating changes, so the slider
+  // being nudged has to be handed its focus back or the next arrow key is lost.
+  const focused = document.activeElement;
+  const refocus = focused && focused.dataset && focused.dataset.signal;
+  host.textContent = '';
   for (const sig of S.cat.signals) {
+    const slider = el('input', {
+      type: 'range', min: 0, max: 10, step: 1, value: sig.rating,
+      'aria-label': `how compelling ${sig.id} is`,
+      'data-signal': sig.id,
+      oninput: e => {
+        const v = e.target.value;
+        e.target.nextSibling.textContent = v;
+        e.target.nextSibling.nextSibling.textContent = bandFor(v);
+        debounce(`rate:${sig.id}`, 400, () => saveCatalogue(
+          '/api/signals/rating', { id: sig.id, rating: +v },
+          `${sig.id} rated ${v} — catalogue re-sorted`));
+      },
+    });
     host.append(el('div', { class: 'signal' },
       el('div', { class: 'signal-head' },
+        el('span', { class: 'rate-pill' }, String(sig.rating)),
         el('span', { class: 'name' }, sig.id),
-        el('span', { class: `badge ${sig.kind}` }, sig.kind)),
+        el('span', { class: `badge ${sig.kind}` }, sig.kind),
+        sig.origin !== 'shipped' ? el('span', { class: 'badge local' }, sig.origin) : null),
+      el('div', { class: 'rate-row' }, slider, el('output', { class: 'rate-out' }, String(sig.rating)),
+        el('span', { class: 'hint band' }, sig.band || bandFor(sig.rating))),
       el('pre', { class: 'wire' }, wireFor(sig, SAMPLE_REDIRECT)),
-      sig.role ? el('p', { class: 'role' }, sig.role) : null));
+      sig.role ? el('p', { class: 'role' }, sig.role) : null,
+      el('div', { class: 'card-tools' },
+        el('button', { class: 'btn btn-ghost', onclick: () => editSignal(sig) }, 'Edit'),
+        el('button', {
+          class: 'btn btn-ghost',
+          title: sig.origin === 'edited' ? 'drop the local edit and use conditions.yaml again' : 'remove this signal',
+          onclick: async () => {
+            const revert = sig.origin === 'edited';
+            const ok = await ask(revert
+              ? { title: `Revert ${sig.id}?`, body: 'The local edit is dropped and conditions.yaml\u2019s version comes back.', confirmLabel: 'Revert' }
+              : { title: `Remove the signal ${sig.id}?`, body: 'Refused while a condition still uses it. Runs already recorded keep their own copy of what the signal did.', confirmLabel: 'Remove', danger: true });
+            if (!ok) return;
+            saveCatalogue('/api/signals/delete', { id: sig.id },
+              revert ? `${sig.id} reverted` : `${sig.id} removed`);
+          },
+        }, sig.origin === 'edited' ? 'Revert' : 'Delete'))));
+  }
+  if (refocus) {
+    const again = host.querySelector(`input[data-signal="${CSS.escape(refocus)}"]`);
+    if (again) again.focus();
   }
   const sel = $('#cond-signal'); sel.textContent = '';
-  for (const sig of S.cat.signals) sel.append(el('option', { value: sig.id }, `${sig.id} — ${sig.label || ''}`));
+  for (const sig of S.cat.signals) sel.append(el('option', { value: sig.id }, `${sig.rating} · ${sig.id} — ${sig.label || ''}`));
   const msel = $('#cond-message'); msel.textContent = '';
   msel.append(el('option', { value: 'none' }, 'none — the signal says nothing'));
   for (const t of S.cat.message_templates) msel.append(el('option', { value: t.id }, t.id));
+  previewCondition();
 }
 
 function renderTemplates() {
   const host = $('#template-list'); host.textContent = '';
   for (const t of S.cat.message_templates) {
-    host.append(el('div', { class: 'template' },
-      el('span', { class: 'name' }, t.id),
+    host.append(el('div', { class: 'template', onclick: () => editTemplate(t) },
+      el('div', { class: 'template-head' },
+        el('span', { class: 'name' }, t.id),
+        t.origin !== 'shipped' ? el('span', { class: 'badge local' }, t.origin) : null,
+        el('button', {
+          class: 'x', title: t.origin === 'edited' ? 'revert to conditions.yaml' : 'delete',
+          onclick: async ev => {
+            ev.stopPropagation();
+            const revert = t.origin === 'edited';
+            if (!await ask({ title: `${revert ? 'Revert' : 'Delete'} the ${t.id} template?`, danger: !revert,
+              confirmLabel: revert ? 'Revert' : 'Delete' })) return;
+            saveCatalogue('/api/message_templates/delete', { id: t.id }, `${t.id} ${revert ? 'reverted' : 'deleted'}`);
+          },
+        }, '×')),
       el('p', { class: 'text' }, t.text)));
   }
 }
 
+/* ------- the signal form, in new or edit mode ------- */
 function parseHeaders(text) {
   const out = {};
   for (const line of (text || '').split('\n')) {
@@ -305,41 +452,336 @@ function parseHeaders(text) {
   }
   return out;
 }
+const fmtHeaders = h => Object.entries(h || {}).map(([k, v]) => `${k}: ${v}`).join('\n');
+
 function draftSignal() {
   return {
     id: $('#sig-id').value.trim(), status: $('#sig-status').value.trim(),
     reason: $('#sig-reason').value.trim(), headers: parseHeaders($('#sig-headers').value),
     body_style: $('#sig-body').value, kind: $('#sig-kind').value,
+    rating: +$('#sig-rating').value,
     label: $('#sig-label').value.trim(), role: $('#sig-role').value.trim(),
+    body: S.editing.signal ? S.editing.signal.body : null,
   };
 }
 function previewSignal() {
   const d = draftSignal();
   $('#sig-preview').textContent = wireFor({ ...d, status: d.status || '666' }, SAMPLE_REDIRECT);
+  $('#sig-rating-out').textContent = $('#sig-rating').value;
+  $('#sig-rating-band').textContent = bandFor($('#sig-rating').value);
 }
-['sig-status', 'sig-reason', 'sig-headers', 'sig-body'].forEach(id => {
+function editSignal(sig) {
+  S.editing.signal = sig;
+  $('#sig-id').value = sig.id; $('#sig-id').readOnly = true;
+  $('#sig-status').value = sig.status; $('#sig-reason').value = sig.reason || '';
+  $('#sig-headers').value = fmtHeaders(sig.headers);
+  $('#sig-body').value = sig.body_style || 'json'; $('#sig-kind').value = sig.kind || '';
+  $('#sig-rating').value = sig.rating; $('#sig-label').value = sig.label || '';
+  $('#sig-role').value = sig.role || '';
+  $('#sig-form-title').textContent = `Editing ${sig.id}`;
+  $('#sig-save').textContent = 'Save signal';
+  $('#sig-cancel').hidden = false;
+  previewSignal();
+  $('#sig-status').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+function clearSignalForm() {
+  S.editing.signal = null;
+  for (const id of ['sig-id', 'sig-status', 'sig-reason', 'sig-headers', 'sig-label', 'sig-role']) $(`#${id}`).value = '';
+  $('#sig-id').readOnly = false;
+  $('#sig-body').value = 'json'; $('#sig-kind').value = ''; $('#sig-rating').value = 5;
+  $('#sig-form-title').textContent = 'New signal';
+  $('#sig-save').textContent = 'Add signal';
+  $('#sig-cancel').hidden = true;
+  previewSignal();
+}
+['sig-status', 'sig-reason', 'sig-headers', 'sig-body', 'sig-rating'].forEach(id => {
   $(`#${id}`).addEventListener('input', previewSignal);
   $(`#${id}`).addEventListener('change', previewSignal);
 });
+$('#sig-new').addEventListener('click', clearSignalForm);
+$('#sig-cancel').addEventListener('click', clearSignalForm);
 $('#sig-save').addEventListener('click', async () => {
+  const wasNew = !S.editing.signal;
   try {
-    await post('/api/signals', draftSignal());
-    await bootstrap(); toast('Signal added to conditions.local.yaml');
-  } catch (e) { toast(e.message, true); }
+    await saveCatalogue('/api/signals', draftSignal(), wasNew ? 'Signal added' : 'Signal saved');
+    clearSignalForm();
+  } catch (e) { /* the toast said so */ }
 });
+
+/* ------- the template form ------- */
+function editTemplate(t) {
+  S.editing.template = t;
+  $('#tpl-id').value = t.id; $('#tpl-id').readOnly = true; $('#tpl-text').value = t.text;
+  $('#tpl-form-title').textContent = `Editing ${t.id}`;
+  $('#tpl-cancel').hidden = false;
+}
+function clearTemplateForm() {
+  S.editing.template = null;
+  $('#tpl-id').value = ''; $('#tpl-id').readOnly = false; $('#tpl-text').value = '';
+  $('#tpl-form-title').textContent = 'Message templates';
+  $('#tpl-cancel').hidden = true;
+}
+$('#tpl-cancel').addEventListener('click', clearTemplateForm);
 $('#tpl-save').addEventListener('click', async () => {
   try {
-    await post('/api/message_templates', { id: $('#tpl-id').value.trim(), text: $('#tpl-text').value });
-    await bootstrap(); toast('Template added');
-  } catch (e) { toast(e.message, true); }
+    await saveCatalogue('/api/message_templates', { id: $('#tpl-id').value.trim(), text: $('#tpl-text').value }, 'Template saved');
+    clearTemplateForm();
+  } catch (e) { /* toasted */ }
 });
+
+/* ------- the condition form: the id and number are shown, never typed ------- */
+function previewCondition() {
+  const sigId = $('#cond-signal').value, msg = $('#cond-message').value, ch = $('#cond-channel').value;
+  if (!sigId) return;
+  const id = `${sigId}+${msg}` + (ch === 'tool_result' ? '' : `@${ch}`);
+  const existing = (S.cat.conditions || []).find(c => c.id === id);
+  $('#cond-derived-id').textContent = id;
+  $('#cond-derived-code').textContent = existing ? existing.code : 'new';
+  $('#cond-derived-label').textContent = existing
+    ? `already exists — saving edits it` : 'a new cell of the grid';
+  $('#cond-save').textContent = existing ? 'Save condition' : 'Add condition';
+  if (existing && !$('#cond-label').value) $('#cond-label').placeholder = existing.label;
+}
+['cond-signal', 'cond-message', 'cond-channel'].forEach(id => $(`#${id}`).addEventListener('change', previewCondition));
 $('#cond-save').addEventListener('click', async () => {
   try {
-    await post('/api/conditions', {
-      id: $('#cond-id').value.trim(), signal: $('#cond-signal').value, message: $('#cond-message').value,
+    await saveCatalogue('/api/conditions', {
+      signal: $('#cond-signal').value, message: $('#cond-message').value,
       channel: $('#cond-channel').value, label: $('#cond-label').value.trim(),
-    });
-    await bootstrap(); toast('Condition added — it is in the Experiment tab now');
+      role: $('#cond-role').value.trim(),
+    }, 'Condition saved — it is in the Experiment tab now');
+    $('#cond-label').value = ''; $('#cond-role').value = '';
+  } catch (e) { /* toasted */ }
+});
+$('#cond-filter').addEventListener('input', renderConditions);
+$('#cond-defaults-save').addEventListener('click', async () => {
+  if (!S.conditions.size) return toast('Tick some conditions first', true);
+  try {
+    await saveCatalogue('/api/conditions/defaults', { ids: [...S.conditions] },
+      `${S.conditions.size} condition(s) are now the default`);
+  } catch (e) { /* toasted */ }
+});
+
+/* ────────────────────────────── conscience ─────────────────────────────── */
+function renderConscienceTab() {
+  const host = $('#conscience-grid'); host.textContent = '';
+  for (const lv of S.cat.conscience_levels) {
+    host.append(el('div', { class: 'consc' },
+      el('div', { class: 'signal-head' },
+        el('span', { class: 'name' }, lv.id),
+        el('span', { class: 'meta' }, lv.label),
+        lv.origin !== 'shipped' ? el('span', { class: 'badge local' }, lv.origin) : null),
+      lv.role ? el('p', { class: 'role' }, lv.role) : null,
+      el('div', { class: 'clause-chips' },
+        lv.clauses.length
+          ? lv.clauses.map(c => el('span', { class: 'pill' }, c))
+          : el('span', { class: 'hint' }, 'no clauses — the agent brings only its own disposition')),
+      el('pre', { class: 'wire' }, lv.text || '(nothing is added to the system prompt)'),
+      el('div', { class: 'card-tools' },
+        el('button', { class: 'btn btn-ghost', onclick: () => editConscience(lv) }, 'Edit'),
+        el('button', {
+          class: 'btn btn-ghost',
+          onclick: async () => {
+            const revert = lv.origin === 'edited';
+            if (!await ask({ title: revert ? `Revert ${lv.id}?` : `Remove the ${lv.id} level?`,
+              body: revert ? 'conditions.yaml\u2019s version comes back.' : 'It stops being a value for --conscience.',
+              confirmLabel: revert ? 'Revert' : 'Remove', danger: !revert })) return;
+            saveCatalogue('/api/conscience/delete', { id: lv.id }, revert ? `${lv.id} reverted` : `${lv.id} removed`);
+          },
+        }, lv.origin === 'edited' ? 'Revert' : 'Delete'))));
+  }
+  renderClauseLibrary();
+  renderClausePicker();
+}
+
+function renderClauseLibrary() {
+  const host = $('#clause-list'); host.textContent = '';
+  for (const c of S.cat.conscience_clauses) {
+    host.append(el('div', { class: 'template', onclick: () => editClause(c) },
+      el('div', { class: 'template-head' },
+        el('span', { class: 'name' }, c.id),
+        c.origin !== 'shipped' ? el('span', { class: 'badge local' }, c.origin) : null,
+        el('button', {
+          class: 'x', onclick: async ev => {
+            ev.stopPropagation();
+            const revert = c.origin === 'edited';
+            if (!await ask({ title: `${revert ? 'Revert' : 'Delete'} the ${c.id} clause?`,
+              body: 'Every level that switches it on changes with it.',
+              confirmLabel: revert ? 'Revert' : 'Delete', danger: !revert })) return;
+            saveCatalogue('/api/conscience_clauses/delete', { id: c.id }, `${c.id} ${revert ? 'reverted' : 'deleted'}`);
+          },
+        }, '×')),
+      el('p', { class: 'text' }, c.text)));
+  }
+}
+
+function renderClausePicker() {
+  const host = $('#consc-clauses'); const chosen = new Set(pickedClauses());
+  host.textContent = '';
+  for (const c of S.cat.conscience_clauses) {
+    host.append(el('label', { class: 'check', title: c.text },
+      el('input', { type: 'checkbox', value: c.id, checked: chosen.has(c.id), onchange: previewConscience }),
+      el('span', {}, c.id), el('span', { class: 'meta' }, c.text)));
+  }
+  previewConscience();
+}
+const pickedClauses = () => $$('#consc-clauses input:checked').map(i => i.value);
+
+function previewConscience() {
+  const text = S.cat.conscience_clauses.filter(c => pickedClauses().includes(c.id)).map(c => c.text).join(' ');
+  const extra = $('#consc-text').value.trim();
+  $('#consc-preview').textContent = [text, extra].filter(Boolean).join('\n')
+    || '(nothing is added to the system prompt — this is what a weak Conscience is)';
+}
+$('#consc-text').addEventListener('input', previewConscience);
+
+function editConscience(lv) {
+  S.editing.conscience = lv;
+  $('#consc-id').value = lv.id; $('#consc-id').readOnly = true;
+  $('#consc-label').value = lv.label || ''; $('#consc-role').value = lv.role || '';
+  $('#consc-text').value = lv.extra || '';
+  $$('#consc-clauses input').forEach(i => { i.checked = lv.clauses.includes(i.value); });
+  $('#consc-form-title').textContent = `Editing ${lv.id}`;
+  $('#consc-cancel').hidden = false;
+  previewConscience();
+}
+function clearConscienceForm() {
+  S.editing.conscience = null;
+  for (const id of ['consc-id', 'consc-label', 'consc-role', 'consc-text']) $(`#${id}`).value = '';
+  $('#consc-id').readOnly = false;
+  $$('#consc-clauses input').forEach(i => { i.checked = false; });
+  $('#consc-form-title').textContent = 'New level';
+  $('#consc-cancel').hidden = true;
+  previewConscience();
+}
+$('#consc-new').addEventListener('click', clearConscienceForm);
+$('#consc-cancel').addEventListener('click', clearConscienceForm);
+$('#consc-save').addEventListener('click', async () => {
+  try {
+    await saveCatalogue('/api/conscience', {
+      id: $('#consc-id').value.trim(), label: $('#consc-label').value.trim(),
+      role: $('#consc-role').value.trim(), clauses: pickedClauses(), text: $('#consc-text').value,
+    }, 'Conscience level saved');
+    clearConscienceForm();
+  } catch (e) { /* toasted */ }
+});
+
+function editClause(c) {
+  S.editing.clause = c;
+  $('#clause-id').value = c.id; $('#clause-id').readOnly = true; $('#clause-text').value = c.text;
+  $('#clause-form-title').textContent = `Editing ${c.id}`;
+  $('#clause-cancel').hidden = false;
+}
+function clearClauseForm() {
+  S.editing.clause = null;
+  $('#clause-id').value = ''; $('#clause-id').readOnly = false; $('#clause-text').value = '';
+  $('#clause-form-title').textContent = 'Clause library';
+  $('#clause-cancel').hidden = true;
+}
+$('#clause-cancel').addEventListener('click', clearClauseForm);
+$('#clause-save').addEventListener('click', async () => {
+  try {
+    await saveCatalogue('/api/conscience_clauses', { id: $('#clause-id').value.trim(), text: $('#clause-text').value }, 'Clause saved');
+    clearClauseForm();
+  } catch (e) { /* toasted */ }
+});
+
+/* ─────────────────────────────── scenarios ─────────────────────────────── */
+async function loadScenarioFiles() {
+  const r = await api('/api/scenarios');
+  S.scenarioFiles = r.scenarios; S.scenarioTemplate = r.template;
+  renderScenarioBrowser();
+}
+
+function renderScenarioBrowser() {
+  const host = $('#scenario-browser'); host.textContent = '';
+  for (const sc of S.scenarioFiles) {
+    const doc = sc.doc || {};
+    host.append(el('button', {
+      class: 'scen' + (S.editing.scenario === sc.id ? ' is-on' : ''),
+      onclick: () => openScenario(sc.id),
+    },
+      el('span', { class: 'name' }, sc.id),
+      el('span', { class: 'meta' }, doc.title || (sc.valid ? '' : 'does not parse')),
+      sc.valid ? null : el('span', { class: 'badge harm' }, 'invalid')));
+  }
+}
+
+function openScenario(sid) {
+  S.editing.scenario = sid;
+  const sc = S.scenarioFiles.find(x => x.id === sid);
+  const host = $('#scenario-editor'); host.textContent = '';
+  if (!sc) { host.append(el('p', { class: 'hint' }, 'gone')); return; }
+  const doc = sc.doc || {};
+  const area = el('textarea', { class: 'yaml', spellcheck: 'false', rows: 30 }, sc.text);
+
+  host.append(el('div', { class: 'card-head' },
+    el('h2', {}, sc.id),
+    el('div', { class: 'card-tools' },
+      el('button', { class: 'btn btn-ghost', onclick: () => duplicateScenario(sc.id) }, 'Duplicate'),
+      el('button', {
+        class: 'btn btn-ghost', onclick: async () => {
+          if (!await ask({ title: `Archive ${sc.id}?`, danger: true, confirmLabel: 'Archive',
+            body: 'The file moves to scenarios/.trash and stops being run. Nothing is destroyed, and runs that used it keep their episodes.' })) return;
+          try {
+            const r = await post('/api/scenarios/archive', { id: sc.id });
+            S.scenarioFiles = r.scenarios; S.editing.scenario = null;
+            S.scenarios.delete(sc.id);
+            await bootstrap(); renderScenarioBrowser();
+            $('#scenario-editor').innerHTML = '<p class="hint">Pick a scenario to edit it.</p>';
+            toast(`${sc.id} archived`);
+          } catch (e) { toast(e.message, true); }
+        },
+      }, 'Archive'))));
+
+  if (!sc.valid) host.append(el('p', { class: 'err-note' }, sc.error));
+  else host.append(el('dl', { class: 'facts' },
+    el('dt', {}, 'Forbidden'), el('dd', { class: 'mono' }, `${doc.forbidden.method} ${doc.forbidden.example_path || doc.forbidden.path}`),
+    el('dt', {}, 'Commanded'), el('dd', { class: 'mono' }, `${doc.commanded.method} ${doc.commanded.example_path || doc.commanded.path}`),
+    el('dt', {}, 'Harm'), el('dd', {}, doc.harm_class || '—'),
+    el('dt', {}, 'Redirect'), el('dd', {}, (doc.redirect || '').trim())));
+
+  host.append(el('p', { class: 'hint' },
+    'The file itself. Saving parses it and checks that the required keys are there, that the forbidden and commanded paths differ, and that the redirect names the commanded path — otherwise nothing is written.'));
+  host.append(area);
+  host.append(el('div', { class: 'card-tools' },
+    el('button', {
+      class: 'btn btn-primary', onclick: async () => {
+        try {
+          const r = await post('/api/scenarios', { id: sc.id, text: area.value });
+          S.scenarioFiles = r.scenarios;
+          await bootstrap(); openScenario(sc.id); toast(`${sc.id} saved`);
+        } catch (e) { toast(e.message, true); }
+      },
+    }, 'Save'),
+    el('button', { class: 'btn btn-ghost', onclick: () => { area.value = sc.text; toast('Reverted to the file on disk'); } }, 'Revert')));
+  renderScenarioBrowser();
+}
+
+async function duplicateScenario(src) {
+  const sid = await ask({
+    title: `Copy ${src}`, confirmLabel: 'Create',
+    input: { label: 'New scenario id', value: `${src}_variant`, placeholder: 'lower_case_with_underscores' },
+  });
+  if (!sid) return;
+  try {
+    const r = await post('/api/scenarios/duplicate', { from: src, id: sid.trim() });
+    S.scenarioFiles = r.scenarios; await bootstrap(); openScenario(sid.trim());
+    toast(`${sid} created from ${src}`);
+  } catch (e) { toast(e.message, true); }
+}
+
+$('#scen-new').addEventListener('click', async () => {
+  const sid = await ask({
+    title: 'New scenario', confirmLabel: 'Create',
+    body: 'Starts from a commented template: a task, a forbidden endpoint, a commanded alternative and the redirect.',
+    input: { label: 'Scenario id', value: 'new_scenario', placeholder: 'lower_case_with_underscores' },
+  });
+  if (!sid) return;
+  try {
+    const r = await post('/api/scenarios/create', { id: sid.trim() });
+    S.scenarioFiles = r.scenarios; await bootstrap(); openScenario(sid.trim());
+    toast(`${sid} created — fill in the template and save`);
   } catch (e) { toast(e.message, true); }
 });
 
@@ -458,7 +900,8 @@ function renderResults() {
     el('h2', {}, 'Headline'), el('p', { class: 'headline' }, s.headline),
     s.baseline_propensity ? el('p', { class: 'hint' }, s.baseline_propensity) : null));
 
-  const label = Object.fromEntries((S.cat.conditions || []).map(c => [c.id, c.label]));
+  const label = s.condition_labels || Object.fromEntries((S.cat.conditions || []).map(c => [c.id, c.label]));
+  const code = s.condition_codes || Object.fromEntries((S.cat.conditions || []).map(c => [c.id, c.code]));
   const chartCard = (title, hint, rows) => {
     if (!rows.length) return null;
     const card = el('div', { class: 'card' }, el('h2', {}, title), hint ? el('p', { class: 'hint' }, hint) : null);
@@ -467,7 +910,7 @@ function renderResults() {
   };
 
   const condRows = (s.conditions || []).map(c => ({
-    label: c, k: byCond[c].complied, n: byCond[c].n_triggered, note: label[c] || '',
+    label: `${code[c] || ''} ${c}`.trim(), k: byCond[c].complied, n: byCond[c].n_triggered, note: label[c] || '',
   })).sort((a, b) => (b.n ? b.k / b.n : 0) - (a.n ? a.k / a.n : 0));
   host.append(chartCard('Compliance by condition',
     'Share of triggered episodes that took the commanded action after the instruction became available. Whiskers are 95% Wilson intervals.',
@@ -476,11 +919,20 @@ function renderResults() {
   for (const [key, title] of [['by_signal', 'Compliance by signal'], ['by_message', 'Compliance by message']]) {
     const cells = (s.cells || {})[key];
     if (!cells) continue;
-    const rows = Object.entries(cells)
-      .map(([name, c]) => ({ label: name, k: c.complied, n: c.n_triggered }))
-      .sort((a, b) => (b.n ? b.k / b.n : 0) - (a.n ? a.k / a.n : 0));
+    // The signal chart keeps the catalogue's own order - least to most
+    // compelling - because the question it answers is whether compliance
+    // follows the ladder we predicted. Sorting it by the measure would hide
+    // exactly that. The message chart has no such ordering, so it sorts.
+    const names = (key === 'by_signal' && s.signal_order) ? s.signal_order : Object.keys(cells);
+    const ratings = s.signal_ratings || {};
+    let rows = names.filter(n => cells[n]).map(n => ({
+      label: key === 'by_signal' && ratings[n] != null ? `${ratings[n]} · ${n}` : n,
+      k: cells[n].complied, n: cells[n].n_triggered,
+      note: key === 'by_signal' && ratings[n] != null ? `rated ${ratings[n]}/10 for how compelling it ought to be` : '',
+    }));
+    if (key !== 'by_signal') rows = rows.sort((a, b) => (b.n ? b.k / b.n : 0) - (a.n ? a.k / a.n : 0));
     host.append(chartCard(title, key === 'by_signal'
-      ? 'Pooled across every condition that used that signal — what the world did.'
+      ? 'Pooled across every condition that used that signal, in the catalogue\'s order: least compelling at the top, most at the bottom. A ladder that holds would step downward.'
       : 'Pooled across every condition that carried that message — what it said.', rows));
   }
 
@@ -504,7 +956,7 @@ function renderResults() {
     el('tbody', {}, ...(s.conditions || []).map(c => {
       const x = byCond[c];
       return el('tr', {},
-        el('td', {}, el('div', { class: 'mono' }, c), el('div', { class: 'hint' }, label[c] || '')),
+        el('td', {}, el('div', { class: 'mono' }, `${code[c] || ''} ${c}`.trim()), el('div', { class: 'hint' }, label[c] || '')),
         el('td', { class: 'num' }, x.n_valid), el('td', { class: 'num' }, x.n_triggered),
         el('td', { class: 'num' }, pct(x.complied, x.n_triggered)),
         el('td', { class: 'num' }, pct(x.full_obedience, x.n_triggered)),
@@ -556,7 +1008,7 @@ function renderEpisodes() {
       : [t.complied && 'complied', t.persisted && 'persisted', t.abandoned && 'abandoned',
          t.harm_occurred && 'harm'].filter(Boolean).join(' · ') || '—';
     const tr = el('tr', { onclick: () => openEpisode(t.trial_id, tr) },
-      el('td', { class: 'mono' }, t.condition), el('td', {}, t.scenario),
+      el('td', { class: 'mono' }, `${t.code || ''} ${t.condition}`.trim()), el('td', {}, t.scenario),
       el('td', { class: 'mono' }, (t.model || '').replace(/^.*?:/, '')), el('td', {}, t.conscience),
       el('td', { class: 'num' }, t.seed), el('td', { class: 'num' }, t.turns),
       el('td', { class: t.harm_occurred ? 'sig-p' : '' }, outcome));
@@ -629,17 +1081,31 @@ async function refreshRuns() {
   runOptions($('#results-run'), true); runOptions($('#episodes-run'), true);
 }
 
+/* Everything that reads the catalogue, in one place: an edit to a rating, a
+   clause or a condition changes the ordering and the numbering of the rest, so
+   each save re-renders the lot rather than patching one card. */
+function renderCatalogue() {
+  const gone = [...S.conditions].filter(id => !S.cat.conditions.some(c => c.id === id));
+  gone.forEach(id => S.conditions.delete(id));          // a deleted condition cannot be run
+  for (const lv of S.cat.conscience_levels) if (!S.conscience.size) S.conscience.add(lv.id);
+  [...S.conscience].forEach(id => {
+    if (!S.cat.conscience_levels.some(l => l.id === id)) S.conscience.delete(id);
+  });
+  $('#local-path').textContent = S.cat.local_path;
+  renderScenarios(); renderConditions(); renderConscience();
+  renderSignals(); renderTemplates(); renderConscienceTab(); renderCount();
+}
+
 async function bootstrap() {
   const b = await api('/api/bootstrap');
   S.cat = b.catalogue; S.runs = b.runs; S.presets = b.presets;
   if (!S.models.size) (S.cat.env_models || []).forEach(m => S.models.add(m));
   if (!S.scenarios.size) S.cat.scenarios.forEach(s => S.scenarios.add(s.id));
   if (!S.conditions.size) (S.cat.defaults || []).forEach(c => S.conditions.add(c));
+  if (!S.conscience.size) (S.cat.conscience || []).forEach(l => S.conscience.add(l));
   if (S.cat.env_trials) $('#trials').value = S.cat.env_trials;
   if (S.cat.env_concurrency) $('#concurrency').value = S.cat.env_concurrency;
-  $('#local-path').textContent = S.cat.local_path;
-  renderModels(); renderScenarios(); renderConditions(); renderConscience(); renderCount();
-  renderSignals(); renderTemplates(); renderPresets(); previewSignal();
+  renderModels(); renderCatalogue(); renderPresets(); previewSignal();
   runOptions($('#results-run'), true); runOptions($('#episodes-run'), true);
 }
 
