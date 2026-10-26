@@ -219,7 +219,7 @@ def test_editing_a_shipped_signal_overrides_it_and_reverting_brings_it_back(loca
     assert [s["rating"] for s in ui.catalogue_payload()["signals"]] == sorted(
         s["rating"] for s in ui.catalogue_payload()["signals"])
 
-    ui.delete_signal("deny")
+    ui.revert_signal("deny")
     assert load_catalogue().signals["deny"].rating == 1
     assert "deny" not in overlay_doc(local_overlay).get("signals", {})
     assert not local_overlay.exists()       # nothing left to override, so no file
@@ -236,14 +236,49 @@ def test_removing_a_locally_added_signal_leaves_no_trace(local_overlay):
     assert "thunder" not in load_catalogue().signals
 
 
-def test_a_signal_a_condition_still_uses_cannot_be_removed(local_overlay):
+def test_removing_a_signal_takes_its_conditions_with_it(local_overlay):
     ui.save_signal({"id": "thunder", "status": "⚡", "rating": 7})
     ui.save_condition({"signal": "thunder", "message": "redirect"})
-    with pytest.raises(ValueError, match="still used by"):
-        ui.delete_signal("thunder")
-    ui.delete_condition("thunder+redirect")
-    ui.delete_signal("thunder")                     # now it goes
-    assert "thunder" not in load_catalogue().signals
+    result = ui.delete_signal("thunder")
+    assert result["conditions_removed"] == ["thunder+redirect"]
+    cat = load_catalogue()
+    assert "thunder" not in cat.signals
+    assert not any(c["signal"]["id"] == "thunder" for c in cat.conditions)
+    assert not local_overlay.exists()               # nothing of it is left behind
+
+
+@pytest.mark.parametrize("sid", list(conds_mod.read_doc()["signals"]))
+def test_every_shipped_signal_can_be_deleted_and_restored(local_overlay, sid):
+    # Every shipped miracle sits in the `expand:` grid or a hand-written
+    # condition, which used to make each one undeletable.
+    before = load_catalogue()
+    ui.delete_signal(sid)
+    cat = load_catalogue()
+    assert sid not in cat.signals
+    assert not any(c["signal"]["id"] == sid for c in cat.conditions)
+    assert {c["id"] for c in cat.conditions} == {c["id"] for c in before.conditions
+                                                 if c["signal"]["id"] != sid}
+    assert sid in ui.catalogue_payload()["removed_signals"]
+
+    ui.restore_signal(sid)
+    assert [c["id"] for c in load_catalogue().conditions] == [c["id"] for c in before.conditions]
+    assert not local_overlay.exists()
+
+
+def test_an_edited_signal_can_be_deleted_not_only_reverted(local_overlay):
+    ui.set_rating("burning_bush", 3)
+    ui.delete_signal("burning_bush")
+    assert "burning_bush" not in load_catalogue().signals
+    ui.restore_signal("burning_bush")               # the shipped one comes back, not the edit
+    assert load_catalogue().signals["burning_bush"].rating == 10
+
+
+def test_a_grid_left_with_no_signals_is_dropped_not_widened(local_overlay):
+    base = {"signals": {"a": {"status": 600}, "b": {"status": 601}},
+            "expand": [{"signals": ["a"], "messages": ["none"]}]}
+    doc = merge_docs(base, {"remove": {"signals": ["a"]}})
+    # an emptied `signals:` list would read as "every signal" and grow the grid
+    assert doc["expand"] == []
 
 
 def test_conscience_levels_and_clauses_are_editable(local_overlay):

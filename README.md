@@ -60,9 +60,11 @@ it just stops you hand-assembling flags and `jq`-ing through `trials.jsonl`.
   named preset.
 - **Miracles** — the signal ladder, least compelling first, each with a preview
   of the exact bytes it puts on the wire: status line, headers, body. Drag a
-  rating and the whole catalogue re-sorts and re-numbers. Every signal, message
-  template and condition is editable here, not just creatable; a shipped one
-  gains a **Revert** button once you have edited it. Everything written lands in
+  rating and the condition numbers follow it, but the card stays put until you
+  press **Sort by rating**. Every signal, message template and condition is
+  editable here, not just creatable; a shipped one gains a **Revert** button
+  once you have edited it. Deleting a signal takes every condition built on it
+  along; a shipped one can be restored, conditions and all. Everything written lands in
   `experiments/conditions.local.yaml`, which the catalogue merges over
   `conditions.yaml` — so the hand-written file keeps its comments — and every
   edit is resolved against the merged catalogue *before* the file is written, so

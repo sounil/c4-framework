@@ -22,6 +22,7 @@ const S = {                      // everything the page knows
   models: new Set(), scenarios: new Set(), conditions: new Set(), conscience: new Set(),
   extraModels: [], launching: null, logSince: 0, summary: null, trials: [], currentTrial: null,
   editing: { signal: null, template: null, conscience: null, clause: null, scenario: null },
+  signalOrder: null,             // signal ids, in the order the Miracles grid shows them
 };
 
 async function api(path, opts) {
@@ -54,7 +55,7 @@ function ask({ title, body, confirmLabel = 'Confirm', danger = false, input = nu
     const done = value => { dlg.close(); dlg.remove(); resolve(value); };
     const form = el('div', { class: 'ask-body' },
       el('h3', {}, title),
-      body ? el('p', {}, body) : null,
+      [].concat(body || []).map(text => el('p', {}, text)),
       input ? el('label', {}, input.label || '', field) : null,
       el('div', { class: 'ask-actions' },
         el('button', { class: 'btn', onclick: () => done(input ? null : false) }, 'Cancel'),
@@ -201,7 +202,7 @@ $$('.chip[data-pick]').forEach(chip => chip.addEventListener('click', () => {
   S.conditions = new Set(
     how === 'all' ? all.map(c => c.id)
       : how === 'none' ? []
-        : how === 'default' ? S.cat.defaults
+        : how === 'default' ? S.cat.defaults.filter(id => all.some(c => c.id === id))
           : how === 'named' ? all.filter(c => !c.generated).map(c => c.id)
             : how === 'ladder' ? ladder()
               : all.filter(c => c.signal.is_miracle).map(c => c.id));
@@ -372,14 +373,66 @@ function channelWords(id) {
   return d.quadrant === '-' ? d.short : `${d.quadrant} — ${d.short}`;
 }
 
+/* The grid keeps the order it was first shown in. The catalogue comes back
+   sorted by rating after every save, and a card that jumped across the grid the
+   moment its slider settled was hard to keep rating. Sorting is a button. */
+function signalsInGridOrder() {
+  const byId = new Map(S.cat.signals.map(s => [s.id, s]));
+  const kept = (S.signalOrder || []).filter(id => byId.has(id));
+  const added = S.cat.signals.map(s => s.id).filter(id => !kept.includes(id));   // new ones go last
+  S.signalOrder = [...kept, ...added];
+  return S.signalOrder.map(id => byId.get(id));
+}
+$('#sig-sort').addEventListener('click', () => {
+  S.signalOrder = S.cat.signals.map(s => s.id);      // the server's order is the ladder
+  renderSignals();
+});
+
+async function revertSignal(sig) {
+  if (!await ask({ title: `Revert ${sig.id}?`, confirmLabel: 'Revert',
+    body: 'The local edit is dropped and conditions.yaml’s version comes back.' })) return;
+  saveCatalogue('/api/signals/revert', { id: sig.id }, `${sig.id} reverted`);
+}
+
+async function deleteSignal(sig) {
+  const built = S.cat.conditions.filter(c => c.signal.id === sig.id);
+  const named = built.filter(c => !c.generated).map(c => c.id);
+  const generated = built.length - named.length;
+  const keys = Object.entries(S.cat.key_conditions || {})
+    .filter(([, id]) => built.some(c => c.id === id)).map(([k]) => k);
+  const defaults = built.filter(c => (S.cat.defaults || []).includes(c.id)).length;
+  const body = [];
+  if (built.length) {
+    const parts = [...named, generated ? `${generated} generated grid cell(s)` : null].filter(Boolean);
+    body.push(`Every condition built on it goes too (${built.length}): ${parts.join(', ')}.`);
+  }
+  if (keys.length || defaults) {
+    body.push([keys.length ? `It is the ${keys.join(' and ')} key condition` : null,
+      defaults ? `${defaults} of the defaults` : null].filter(Boolean).join(', and ')
+      + ' — analyses that need it will say it is missing.');
+  }
+  body.push(sig.origin === 'local'
+    ? 'It exists only in conditions.local.yaml, so this cannot be undone.'
+    : 'conditions.yaml keeps it; your overlay records the removal, and Restore brings it back with its conditions.'
+      + (sig.origin === 'edited' ? ' Your local edit is not kept.' : ''));
+  body.push('Runs already recorded keep their own copy of what the signal did.');
+  if (!await ask({ title: `Delete the signal ${sig.id}?`, body, confirmLabel: 'Delete', danger: true })) return;
+  saveCatalogue('/api/signals/delete', { id: sig.id },
+    built.length ? `${sig.id} deleted, with ${built.length} condition(s)` : `${sig.id} deleted`);
+}
+
 function renderSignals() {
   const host = $('#signal-grid');
-  // The grid re-sorts under the pointer when a rating changes, so the slider
-  // being nudged has to be handed its focus back or the next arrow key is lost.
+  // The grid is rebuilt after every save, so the slider being nudged has to be
+  // handed its focus back or the next arrow key is lost.
   const focused = document.activeElement;
   const refocus = focused && focused.dataset && focused.dataset.signal;
   host.textContent = '';
-  for (const sig of S.cat.signals) {
+  const shown = signalsInGridOrder();
+  const sorted = shown.every((s, i) => s.id === S.cat.signals[i].id);
+  $('#sig-sort').disabled = sorted;
+  $('#sig-sort').title = sorted ? 'already in rating order' : 'put the cards back in rating order, least compelling first';
+  for (const sig of shown) {
     const slider = el('input', {
       type: 'range', min: 0, max: 10, step: 1, value: sig.rating,
       'aria-label': `how compelling ${sig.id} is`,
@@ -389,8 +442,7 @@ function renderSignals() {
         e.target.nextSibling.textContent = v;
         e.target.nextSibling.nextSibling.textContent = bandFor(v);
         debounce(`rate:${sig.id}`, 400, () => saveCatalogue(
-          '/api/signals/rating', { id: sig.id, rating: +v },
-          `${sig.id} rated ${v} — catalogue re-sorted`));
+          '/api/signals/rating', { id: sig.id, rating: +v }, `${sig.id} rated ${v}`));
       },
     });
     host.append(el('div', { class: 'signal' },
@@ -405,23 +457,27 @@ function renderSignals() {
       sig.role ? el('p', { class: 'role' }, sig.role) : null,
       el('div', { class: 'card-tools' },
         el('button', { class: 'btn btn-ghost', onclick: () => editSignal(sig) }, 'Edit'),
-        el('button', {
-          class: 'btn btn-ghost',
-          title: sig.origin === 'edited' ? 'drop the local edit and use conditions.yaml again' : 'remove this signal',
-          onclick: async () => {
-            const revert = sig.origin === 'edited';
-            const ok = await ask(revert
-              ? { title: `Revert ${sig.id}?`, body: 'The local edit is dropped and conditions.yaml\u2019s version comes back.', confirmLabel: 'Revert' }
-              : { title: `Remove the signal ${sig.id}?`, body: 'Refused while a condition still uses it. Runs already recorded keep their own copy of what the signal did.', confirmLabel: 'Remove', danger: true });
-            if (!ok) return;
-            saveCatalogue('/api/signals/delete', { id: sig.id },
-              revert ? `${sig.id} reverted` : `${sig.id} removed`);
-          },
-        }, sig.origin === 'edited' ? 'Revert' : 'Delete'))));
+        sig.origin === 'edited'
+          ? el('button', { class: 'btn btn-ghost', title: 'drop the local edit and use conditions.yaml again',
+            onclick: () => revertSignal(sig) }, 'Revert')
+          : null,
+        el('button', { class: 'btn btn-ghost', title: 'remove this signal and every condition built on it',
+          onclick: () => deleteSignal(sig) }, 'Delete'))));
   }
   if (refocus) {
     const again = host.querySelector(`input[data-signal="${CSS.escape(refocus)}"]`);
     if (again) again.focus();
+  }
+  const removed = $('#signal-removed'); removed.textContent = '';
+  removed.hidden = !(S.cat.removed_signals || []).length;
+  if (!removed.hidden) {
+    removed.append(el('span', { class: 'hint' }, 'Removed from conditions.yaml:'));
+    for (const id of S.cat.removed_signals) {
+      removed.append(el('button', {
+        class: 'chip', title: `bring ${id} back, with every condition built on it`,
+        onclick: () => saveCatalogue('/api/signals/restore', { id }, `${id} restored`),
+      }, `Restore ${id}`));
+    }
   }
   const sel = $('#cond-signal'); sel.textContent = '';
   for (const sig of S.cat.signals) sel.append(el('option', { value: sig.id }, `${sig.rating} · ${sig.id} — ${sig.label || ''}`));

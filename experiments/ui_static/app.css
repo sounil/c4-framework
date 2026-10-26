@@ -151,6 +151,8 @@ label input, label select, label textarea { margin-top: 4px; }
   border-radius: 7px; padding: 9px 10px; margin: 0; white-space: pre-wrap; word-break: break-word;
   border-left: 2px solid var(--series-1); }
 .signal .role { font-size: 11.5px; color: var(--muted); margin: 8px 0 0; }
+.removed-strip { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
+.removed-strip[hidden] { display: none; }
 .preview-wrap { display: flex; flex-direction: column; gap: 4px; }
 .template-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
 .template { font-size: 12px; }

@@ -389,7 +389,7 @@ def merge_duplicates(conditions: list[dict]) -> list[dict]:
         if first.get("generated") and not second.get("generated"):
             first, second = second, first        # the hand-written one is the keeper
         for key, value in second.items():
-            if key == "aliases":
+            if key in ("aliases", "generated"):      # a hand-written keeper has no `generated` to protect
                 continue
             first.setdefault(key, value)
         first["aliases"] = list(dict.fromkeys(first.get("aliases", []) + second.get("aliases", [])))
@@ -475,6 +475,23 @@ def merge_docs(base: dict, local: dict) -> dict:
     for key in ("signals", "message_templates", "conscience_clauses", "conscience"):
         for name in remove.get(key) or []:
             doc.get(key, {}).pop(name, None)
+    # A condition is its signal, so removing a signal takes every cell built on
+    # it along: out of each `expand:` grid, and out of the hand-written list.
+    # One `remove:` line is then the whole deletion, and dropping it is the
+    # whole undo.
+    gone = set(remove.get("signals") or [])
+    if gone:
+        blocks = []
+        for blk in doc.get("expand") or []:
+            sids = blk.get("signals")
+            if sids:
+                kept = [s for s in sids if s not in gone]
+                if not kept:        # an empty list would read as "every signal"
+                    continue
+                blk = {**blk, "signals": kept}
+            blocks.append(blk)
+        doc["expand"] = blocks
+        doc["conditions"] = [c for c in doc.get("conditions") or [] if c.get("signal") not in gone]
     dropped = set(remove.get("conditions") or [])
     if dropped:
         doc["conditions"] = [c for c in doc.get("conditions") or []

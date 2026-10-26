@@ -256,6 +256,7 @@ def test_a_cell_written_by_hand_and_generated_is_one_condition():
     merged = cat.by_id["code_666+redirect"]
     assert merged["label"] == "Miracle + redirect"          # the hand-written label won
     assert "C4_miracle_msg" in merged["aliases"] and "M_code_666_redirect" in merged["aliases"]
+    assert not merged["generated"]                          # and it still counts as hand-written
 
 
 def test_conditions_select_by_number_signal_or_legacy_name():

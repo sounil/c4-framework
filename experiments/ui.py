@@ -292,6 +292,7 @@ def catalogue_payload() -> dict:
         "signals": [{**s.as_dict(), "origin": _origin("signals", s.id),
                      "band": cat.rating_scale.get(s.rating, "")}
                     for s in cat.signals.values()],
+        "removed_signals": ((_load_local().get("remove") or {}).get("signals") or []),
         "rating_scale": [{"rating": k, "band": v} for k, v in sorted(cat.rating_scale.items())],
         "message_templates": [{"id": k, "text": v, "origin": _origin("message_templates", k)}
                               for k, v in cat.message_templates.items()],
@@ -421,10 +422,45 @@ def _forget(kind: str, name: str, used: list[str], used_msg: str) -> dict:
 
 
 def delete_signal(sid: str) -> dict:
-    """Revert an edited signal, or remove one entirely."""
-    used = [c["id"] for c in load_catalogue().conditions
-            if c["signal"]["id"] == sid and not c.get("generated")]
-    return _forget("signals", sid, used, "signal {name!r} is still used by")
+    """Remove a signal entirely, and every condition built on it.
+
+    A condition without its signal is not a condition, so refusing while one
+    still used it made most signals undeletable: every shipped miracle sits in
+    an `expand:` grid or a hand-written condition. A shipped signal gets one
+    `remove:` entry, which merge_docs follows into the grids and the condition
+    list; restore_signal drops that entry and brings all of it back.
+    """
+    cat = load_catalogue()
+    if sid not in cat.signals:
+        raise KeyError(f"unknown signal {sid!r}")
+    gone = [c["id"] for c in cat.conditions if c["signal"]["id"] == sid]
+    doc = _load_local()
+    (doc.get("signals") or {}).pop(sid, None)
+    doc["conditions"] = [c for c in doc.get("conditions") or [] if c.get("signal") != sid]
+    if sid in (read_doc(DEFAULT_PATH).get("signals") or {}):
+        _mark_removed(doc, "signals", sid, True)
+    _save_local(doc)
+    return {"ok": True, "id": sid, "conditions_removed": gone}
+
+
+def revert_signal(sid: str) -> dict:
+    """Drop a local edit of a shipped signal, so conditions.yaml's version is back."""
+    doc = _load_local()
+    if sid not in (doc.get("signals") or {}) or sid not in (read_doc(DEFAULT_PATH).get("signals") or {}):
+        raise ValueError(f"signal {sid!r} has no local edit to revert")
+    doc["signals"].pop(sid)
+    _save_local(doc)
+    return {"ok": True, "id": sid, "reverted": True}
+
+
+def restore_signal(sid: str) -> dict:
+    """Undo delete_signal on a shipped signal, conditions and all."""
+    doc = _load_local()
+    if sid not in ((doc.get("remove") or {}).get("signals") or []):
+        raise ValueError(f"signal {sid!r} was not removed")
+    _mark_removed(doc, "signals", sid, False)
+    _save_local(doc)
+    return {"ok": True, "id": sid}
 
 
 # -- message templates -------------------------------------------------------
@@ -708,6 +744,10 @@ class Handler(BaseHTTPRequestHandler):
                 return saved(set_rating(body["id"], body["rating"]))
             if path == "/api/signals/delete":
                 return saved(delete_signal(body["id"]))
+            if path == "/api/signals/revert":
+                return saved(revert_signal(body["id"]))
+            if path == "/api/signals/restore":
+                return saved(restore_signal(body["id"]))
             if path == "/api/message_templates":
                 return saved(save_template(body))
             if path == "/api/message_templates/delete":

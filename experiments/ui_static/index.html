@@ -119,13 +119,16 @@
     <div class="card-head">
       <h2>Signals <small class="hint">— what the world does when the agent touches the forbidden path</small></h2>
       <button id="sig-new" class="btn btn-ghost">New signal</button>
+      <button id="sig-sort" class="btn btn-ghost">Sort by rating</button>
     </div>
     <p class="hint">
-      Ordered least to most compelling, by the <em>rating</em> on each one. The rating is a prior —
+      The <em>rating</em> on each one says how compelling it ought to be. It is a prior —
       what we expect before the data, written down so the by-signal results can be read against it —
-      not a measurement. Drag a slider to re-rate; the whole catalogue re-sorts and re-numbers itself.
+      not a measurement. Drag a slider to re-rate: the card stays where it is, the condition numbers
+      follow the new rating, and <em>Sort by rating</em> puts the grid back in ladder order.
     </p>
     <div id="signal-grid" class="signal-grid"></div>
+    <div id="signal-removed" class="removed-strip" hidden></div>
   </section>
 
   <div class="split">
